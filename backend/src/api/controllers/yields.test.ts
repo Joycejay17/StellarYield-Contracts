@@ -20,16 +20,19 @@ describe("Yield Controllers", () => {
   describe("getVaultEpochs", () => {
     it("returns 200 with an array of epochs", async () => {
       const { query, getVaultEpochs } = await getTestContext();
-      query.mockResolvedValue([
-        {
-          id: 1,
-          vault_id: 10,
-          epoch: 1,
-          yield_amount: "500",
-          total_shares: "5000",
-          distributed_at: new Date("2025-01-01"),
-        },
-      ]);
+      query
+        .mockResolvedValueOnce([
+          {
+            id: 1,
+            vault_id: 10,
+            epoch: 1,
+            yield_amount: "500",
+            total_shares: "5000",
+            distributed_at: new Date("2025-01-01"),
+          },
+        ])
+        .mockResolvedValueOnce([]) // claim stats
+        .mockResolvedValueOnce([]); // holder counts
 
       const req = { params: { contractId: "CC_VAULT" } } as any;
       const res = { json: vi.fn() } as any;
@@ -46,7 +49,7 @@ describe("Yield Controllers", () => {
 
     it("returns empty array when vault has no epochs", async () => {
       const { query, getVaultEpochs } = await getTestContext();
-      query.mockResolvedValue([]);
+      query.mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
 
       const req = { params: { contractId: "CC_EMPTY" } } as any;
       const res = { json: vi.fn() } as any;
