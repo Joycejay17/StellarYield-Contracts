@@ -40,6 +40,20 @@ export async function getVaultEpochs(req: Request, res: Response, next: NextFunc
   }
 }
 
+export async function getEpochDetail(req: Request, res: Response, next: NextFunction) {
+  try {
+    const epoch = Number(req.params["epoch"]);
+    const detail = await yieldService.getEpochDetail(String(req.params["contractId"]), epoch);
+    if (!detail) {
+      res.status(404).json({ error: "NotFound", message: "Epoch not found" });
+      return;
+    }
+    res.json(detail);
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getUserPendingYield(req: Request, res: Response, next: NextFunction) {
   try {
     const result = await yieldService.getUserPendingYield(
