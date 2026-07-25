@@ -1,9 +1,11 @@
 import { Router } from "express";
 import { getAdminStats, getAdminIndexer, getAdminEvents, getVaultAudit, backfillIndexer, deleteApiKey, getApiKeys, getWebhookDeliveries, getArchivedVaults, getTotalSupplyConsistency, getDbStats } from "../controllers/admin.js";
 import { requireApiKey } from "../middleware/auth.js";
+import { ipAllowlist } from "../middleware/ipAllowlist.js";
 
 export const adminRouter = Router();
 
+adminRouter.use(ipAllowlist());
 adminRouter.use(requireApiKey({ role: "admin" }));
 
 adminRouter.get("/stats", getAdminStats);

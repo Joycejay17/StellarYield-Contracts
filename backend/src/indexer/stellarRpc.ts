@@ -1,4 +1,4 @@
-import { config } from '../config';
+import { rpcFetch } from '../services/rpcClient.js';
 
 interface RpcEvent {
   type: string;
@@ -14,11 +14,7 @@ interface LedgerEvents {
 }
 
 export class StellarRpcClient {
-  private rpcUrl: string;
-
-  constructor() {
-    this.rpcUrl = config.stellar.rpcUrl;
-  }
+  constructor() {}
 
   async getEvents(startLedger: number, endLedger?: number): Promise<LedgerEvents[]> {
     const filters = {
@@ -40,25 +36,21 @@ export class StellarRpcClient {
     }
 
     try {
-      const response = await fetch(this.rpcUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'getEvents',
-          params: [params]
-        })
-      });
+      const payload = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getEvents',
+        params: [params]
+      };
+
+      const response = await rpcFetch(payload);
 
       if (!response.ok) {
         throw new Error(`RPC request failed: ${response.statusText}`);
       }
 
       const data = await response.json();
-      
+
       if (data.error) {
         throw new Error(`RPC error: ${data.error.message}`);
       }
@@ -72,25 +64,21 @@ export class StellarRpcClient {
 
   async getLatestLedger(): Promise<number> {
     try {
-      const response = await fetch(this.rpcUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'getLatestLedger',
-          params: []
-        })
-      });
+      const payload = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getLatestLedger',
+        params: []
+      };
+
+      const response = await rpcFetch(payload);
 
       if (!response.ok) {
         throw new Error(`RPC request failed: ${response.statusText}`);
       }
 
       const data = await response.json();
-      
+
       if (data.error) {
         throw new Error(`RPC error: ${data.error.message}`);
       }

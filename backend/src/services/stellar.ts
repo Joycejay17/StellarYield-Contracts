@@ -1,6 +1,7 @@
 import { Account, Contract, TransactionBuilder, BASE_FEE } from "@stellar/stellar-sdk";
 import { rpc, scValToNative, xdr, Address } from "@stellar/stellar-sdk";
 import { config } from "../config.js";
+import { tryRpcEndpoints } from "./rpcClient.js";
 import type { VaultState } from "../types/index.js";
 
 export function getSorobanRpc(): rpc.Server {
@@ -10,15 +11,13 @@ export function getSorobanRpc(): rpc.Server {
 /**
  * Simulate a read-only contract call and return the decoded native value.
  * Uses a zero-sequence throwaway account — no signing required for simulations.
+ * Automatically retries on fallback RPC endpoints (#746) with configurable timeout (#747).
  */
 async function simulateRead<T>(
   contractId: string,
   method: string,
   args: xdr.ScVal[] = [],
 ): Promise<T> {
-  const server = getSorobanRpc();
-
-  // Throwaway source account — sequence number 0 is fine for simulation only.
   const source = new Account(
     "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H",
     "0",
@@ -33,7 +32,27 @@ async function simulateRead<T>(
     .setTimeout(30)
     .build();
 
-  const sim = await server.simulateTransaction(tx);
+  const sim = await tryRpcEndpoints(async (url) => {
+    const server = new rpc.Server(url);
+    const timeoutMs = config.stellar.rpcTimeoutMs;
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error(`RPC call timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+
+    try {
+      const result = await Promise.race([
+        server.simulateTransaction(tx),
+        timeoutPromise,
+      ]);
+      return result;
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+  });
 
   if (rpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation error for ${method}: ${sim.error}`);
