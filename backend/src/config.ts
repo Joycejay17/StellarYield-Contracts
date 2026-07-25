@@ -125,6 +125,16 @@ const envSchema = z.object({
     .default("15000")
     .transform((v) => parseInt(v, 10))
     .pipe(z.number().int().min(1)),
+  DB_POOL_ALERT_WAITING: z
+    .string()
+    .default("5")
+    .transform((v) => parseInt(v, 10))
+    .pipe(z.number().int().min(0)),
+  RPC_ERROR_RATE_ALERT_PCT: z
+    .string()
+    .default("10")
+    .transform((v) => parseInt(v, 10))
+    .pipe(z.number().int().min(1).max(100)),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -209,4 +219,6 @@ export const config = {
     maxAge: parsed.data.CORS_MAX_AGE,
   },
   sseHeartbeatMs: parsed.data.SSE_HEARTBEAT_MS,
+  dbPoolAlertWaiting: parsed.data.DB_POOL_ALERT_WAITING,
+  rpcErrorRateAlertPct: parsed.data.RPC_ERROR_RATE_ALERT_PCT,
 } as const;

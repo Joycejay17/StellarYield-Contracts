@@ -107,6 +107,37 @@ export async function getYieldSummary(req: Request, res: Response, next: NextFun
   }
 }
 
+export async function getYieldTimeline(req: Request, res: Response, next: NextFunction) {
+  try {
+    const contractId = String(req.params["contractId"]);
+    const fromParam = req.query.from as string | undefined;
+    const toParam = req.query.to as string | undefined;
+
+    let fromDate: Date | undefined;
+    let toDate: Date | undefined;
+
+    if (fromParam) {
+      fromDate = new Date(fromParam);
+      if (isNaN(fromDate.getTime())) {
+        res.status(400).json({ error: "BadRequest", message: "Invalid from date format" });
+        return;
+      }
+    }
+    if (toParam) {
+      toDate = new Date(toParam);
+      if (isNaN(toDate.getTime())) {
+        res.status(400).json({ error: "BadRequest", message: "Invalid to date format" });
+        return;
+      }
+    }
+
+    const result = await yieldService.getYieldTimeline(contractId, fromDate, toDate);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getYieldPerShareHistory(
   req: Request,
   res: Response,
