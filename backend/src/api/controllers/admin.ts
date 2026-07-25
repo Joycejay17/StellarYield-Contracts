@@ -1,12 +1,42 @@
+import { createHash } from "node:crypto";
 import type { Request, Response, NextFunction } from "express";
 import { query } from "../../db/index.js";
 import { indexer } from "../../services/indexerSingleton.js";
+import { jobQueue } from "../../services/jobQueue.js";
+import { sseManager } from "../../services/sseManager.js";
 import { logger } from "../../logger.js";
-import { boss, INDEXER_BACKFILL_QUEUE } from "../../queue/boss.js";
 import { z } from "zod";
 
 const stellarAddressSchema = z.string().length(56).regex(/^G[A-Z2-7]{55}$/);
 const contractAddressSchema = z.string().length(56).regex(/^C[A-Z2-7]{55}$/);
+
+function getClientIp(req: Request): string | null {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string") {
+    return forwarded.split(",")[0]?.trim() || null;
+  }
+  if (Array.isArray(forwarded)) {
+    return forwarded[0] ?? null;
+  }
+  return req.ip ?? null;
+}
+
+function getRequestBodyHash(body: unknown): string {
+  const normalized = typeof body === "string"
+    ? body
+    : body == null
+      ? ""
+      : JSON.stringify(body);
+  return createHash("sha256").update(normalized).digest("hex");
+}
+
+async function logAdminAudit(req: Request, action: string, target: string): Promise<void> {
+  await query(
+    `INSERT INTO admin_audit_log (api_key_label, action, target, ip_address, request_body_hash, created_at)
+     VALUES ($1, $2, $3, $4, $5, NOW())`,
+    [req.apiKey?.label ?? null, action, target, getClientIp(req), getRequestBodyHash(req.body)],
+  );
+}
 
 export async function getAdminStats(_req: Request, res: Response, next: NextFunction) {
   try {
@@ -65,9 +95,11 @@ export async function backfillIndexer(req: Request, res: Response, next: NextFun
       return;
     }
 
+    await logAdminAudit(req, "backfill_indexer", "/api/v1/admin/indexer/backfill");
+
     // Persist the backfill range as a pg-boss job so it survives a process
-    // restart, instead of the old in-memory queue (#845, #846).
-    const jobId = await boss.send(INDEXER_BACKFILL_QUEUE, { fromLedger, toLedger });
+    // restart, instead of the old in-memory queue (#846).
+    const jobId = await jobQueue.send("indexer-backfill", { fromLedger, toLedger });
 
     // Return 202 Accepted immediately
     res.status(202).json({ queued: true, fromLedger, toLedger, jobId });
@@ -94,6 +126,7 @@ export async function deleteApiKey(req: Request, res: Response, next: NextFuncti
     }
 
     await query("DELETE FROM api_keys WHERE id = $1", [idNum]);
+    await logAdminAudit(req, "delete_api_key", `/api/v1/admin/api-keys/${idNum}`);
 
     res.status(204).send();
   } catch (err) {
@@ -263,6 +296,200 @@ export async function getVaultAudit(req: Request, res: Response, next: NextFunct
   }
 }
 
+export async function getAdminFeesDashboard(req: Request, res: Response, next: NextFunction) {
+  try {
+    const from = typeof req.query["from"] === "string" ? req.query["from"] : undefined;
+    const to = typeof req.query["to"] === "string" ? req.query["to"] : undefined;
+
+    const parsedDateFilters: { column: string; value: string; operator: string }[] = [];
+    const dateParams: string[] = [];
+
+    const parseDate = (value: string | undefined, label: "from" | "to") => {
+      if (!value) return undefined;
+      const parsed = new Date(value);
+      if (Number.isNaN(parsed.getTime())) {
+        throw new Error(`Invalid ${label} date`);
+      }
+      return parsed.toISOString();
+    };
+
+    const fromDate = parseDate(from, "from");
+    const toDate = parseDate(to, "to");
+
+    if (fromDate) {
+      parsedDateFilters.push({ column: "ie.created_at", value: fromDate, operator: ">=" });
+      dateParams.push(fromDate);
+    }
+    if (toDate) {
+      parsedDateFilters.push({ column: "ie.created_at", value: toDate, operator: "<=" });
+      dateParams.push(toDate);
+    }
+
+    const dateWhereClause = parsedDateFilters.length > 0
+      ? `WHERE ${parsedDateFilters.map((filter, index) => `${filter.column} ${filter.operator} $${index + 1}`).join(" AND ")}`
+      : "";
+    const dateFilterSuffix = dateWhereClause ? " AND " : " WHERE ";
+
+    const feeSubquery = `SELECT
+        ie.contract_id,
+        COALESCE(SUM((ie.parsed_data->>'operatorFee')::numeric), 0)::text AS total_operator_fees
+      FROM indexed_events ie
+      ${dateWhereClause}${dateFilterSuffix}ie.event_type = 'yield_distributed'
+      AND ie.parsed_data IS NOT NULL
+      GROUP BY ie.contract_id`;
+
+    const lastFeeSubquery = `SELECT ranked.contract_id, ranked.operator_fee
+      FROM (
+        SELECT
+          ie.contract_id,
+          COALESCE((ie.parsed_data->>'operatorFee')::text, '0') AS operator_fee,
+          row_number() OVER (PARTITION BY ie.contract_id ORDER BY ie.created_at DESC, ie.id DESC) AS rn
+        FROM indexed_events ie
+        ${dateWhereClause}${dateFilterSuffix}ie.event_type = 'yield_distributed'
+        AND ie.parsed_data IS NOT NULL
+      ) ranked
+      WHERE ranked.rn = 1`;
+
+    const rows = await query<{
+      contract_id: string;
+      name: string | null;
+      fee_bps: number | null;
+      total_operator_fees: string;
+      epoch_count: string;
+      last_epoch_fee: string;
+    }>(
+      `SELECT
+         v.contract_id,
+         v.name,
+         COALESCE(v.operator_fee_bps, 0) AS fee_bps,
+         COALESCE(f.total_operator_fees, '0') AS total_operator_fees,
+         COALESCE(e.epoch_count, 0)::text AS epoch_count,
+         COALESCE(lf.operator_fee, '0') AS last_epoch_fee
+       FROM vaults v
+       LEFT JOIN (${feeSubquery}) f ON f.contract_id = v.contract_id
+       LEFT JOIN (
+         SELECT vault_id, COUNT(*)::text AS epoch_count
+         FROM epochs
+         GROUP BY vault_id
+       ) e ON e.vault_id = v.id
+       LEFT JOIN (${lastFeeSubquery}) lf ON lf.contract_id = v.contract_id
+       ORDER BY COALESCE(f.total_operator_fees, '0')::numeric DESC`,
+      dateParams,
+    );
+
+    res.json(rows.map((row) => ({
+      contractId: row.contract_id,
+      name: row.name,
+      totalOperatorFees: row.total_operator_fees,
+      epochCount: parseInt(row.epoch_count ?? "0", 10),
+      feeBps: row.fee_bps ?? 0,
+      lastEpochFee: row.last_epoch_fee ?? "0",
+    })));
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("Invalid ")) {
+      res.status(400).json({ error: "BadRequest", message: err.message });
+      return;
+    }
+    next(err);
+  }
+}
+
+export async function deleteUser(req: Request, res: Response, next: NextFunction) {
+  try {
+    const address = String(req.params["address"]);
+
+    const existingRows = await query<{ id: number }>("SELECT id FROM users WHERE address = $1", [address]);
+    if (existingRows.length === 0) {
+      res.status(404).json({ error: "NotFound", message: "User not found" });
+      return;
+    }
+
+    const redactedAddress = "[REDACTED]";
+    const tables = ["user_vault_positions", "share_balance_snapshots", "redemption_requests"];
+
+    let recordsAffected = 0;
+    for (const table of tables) {
+      const updated = await query<{ id: number }>(
+        `UPDATE ${table} SET user_address = $1 WHERE user_address = $2 RETURNING id`,
+        [redactedAddress, address],
+      );
+      recordsAffected += updated.length;
+    }
+
+    // Anonymise historical blockchain events referencing this address, without deleting the events themselves.
+    const redactedUserEvents = await query<{ id: number }>(
+      `UPDATE indexed_events SET payload = jsonb_set(payload, '{user}', '"[REDACTED]"')
+       WHERE payload->>'user' = $1
+       RETURNING id`,
+      [address],
+    );
+    recordsAffected += redactedUserEvents.length;
+
+    const redactedAddressEvents = await query<{ id: number }>(
+      `UPDATE indexed_events SET payload = jsonb_set(payload, '{address}', '"[REDACTED]"')
+       WHERE payload->>'address' = $1
+       RETURNING id`,
+      [address],
+    );
+    recordsAffected += redactedAddressEvents.length;
+
+    await query("DELETE FROM users WHERE address = $1", [address]);
+    await logAdminAudit(req, "delete_user", `/api/v1/admin/users/${address}`);
+
+    const deletedAt = new Date().toISOString();
+
+    res.json({ address, deletedAt, recordsAffected });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getAdminAuditLog(req: Request, res: Response, next: NextFunction) {
+  try {
+    const rawPage = parseInt(String(req.query["page"] ?? "1"), 10);
+    const page = Math.max(1, isNaN(rawPage) ? 1 : rawPage);
+    const rawPageSize = parseInt(String(req.query["pageSize"] ?? "20"), 10);
+    const pageSize = Math.max(1, Math.min(100, isNaN(rawPageSize) ? 20 : rawPageSize));
+    const offset = (page - 1) * pageSize;
+
+    const countRows = await query<{ count: string }>("SELECT COUNT(*)::text AS count FROM admin_audit_log");
+    const total = parseInt(countRows[0]?.count ?? "0", 10);
+
+    const rows = await query<{
+      id: number;
+      api_key_label: string | null;
+      action: string;
+      target: string;
+      ip_address: string | null;
+      request_body_hash: string;
+      created_at: Date;
+    }>(
+      `SELECT id, api_key_label, action, target, ip_address, request_body_hash, created_at
+       FROM admin_audit_log
+       ORDER BY created_at DESC
+       LIMIT $1 OFFSET $2`,
+      [pageSize, offset],
+    );
+
+    res.json({
+      data: rows.map((row) => ({
+        id: row.id,
+        apiKeyLabel: row.api_key_label,
+        action: row.action,
+        target: row.target,
+        ipAddress: row.ip_address,
+        requestBodyHash: row.request_body_hash,
+        createdAt: row.created_at,
+      })),
+      total,
+      page,
+      pageSize,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getArchivedVaults(_req: Request, res: Response, next: NextFunction) {
   try {
     const { VaultService } = await import("../../services/vault.js");
@@ -346,21 +573,8 @@ export async function getDbStats(_req: Request, res: Response, next: NextFunctio
   }
 }
 
-/**
- * GET /api/v1/admin/fees
- *
- * Returns platform-wide fee analytics:
- *   { totalOperatorFees, totalEarlyRedemptionFees, totalPlatformRevenue,
- *     topFeeVaults }
- *
- * topFeeVaults = top 5 vaults by total operator fees.
- * totalPlatformRevenue = totalOperatorFees + totalEarlyRedemptionFees.
- *
- * Issue #789
- */
 export async function getAdminFees(_req: Request, res: Response, next: NextFunction) {
   try {
-    // Total operator fees across all vaults from parsed_data
     const operatorFeeRows = await query<{ total: string }>(
       `SELECT COALESCE(SUM((parsed_data->>'operatorFee')::numeric), 0)::text AS total
        FROM indexed_events
@@ -368,7 +582,6 @@ export async function getAdminFees(_req: Request, res: Response, next: NextFunct
     );
     const totalOperatorFees = operatorFeeRows[0]?.total ?? "0";
 
-    // Total early redemption fees from redemption_requests
     const redemptionFeeRows = await query<{ total: string }>(
       `SELECT COALESCE(SUM(fee_revenue), 0)::text AS total
        FROM redemption_requests
@@ -380,7 +593,6 @@ export async function getAdminFees(_req: Request, res: Response, next: NextFunct
     const totalRedemptionBig = BigInt(Math.round(parseFloat(totalEarlyRedemptionFees)));
     const totalPlatformRevenue = (totalOperatorBig + totalRedemptionBig).toString();
 
-    // Top 5 vaults by total operator fees
     const topFeeVaults = await query<{ contract_id: string; total_fees: string }>(
       `SELECT
          ie.contract_id,
@@ -406,11 +618,6 @@ export async function getAdminFees(_req: Request, res: Response, next: NextFunct
   }
 }
 
-/**
- * POST /api/v1/admin/users/:address/aml-flag
- *
- * Sets aml_flagged = true on a user record. Admin only. (#798)
- */
 export async function flagUserAml(req: Request, res: Response, next: NextFunction) {
   try {
     const parsed = stellarAddressSchema.safeParse(req.params["address"]);
@@ -441,11 +648,6 @@ export async function flagUserAml(req: Request, res: Response, next: NextFunctio
   }
 }
 
-/**
- * POST /api/v1/admin/users/:address/aml-clear
- *
- * Sets aml_flagged = false on a user record. Admin only. (#798)
- */
 export async function clearUserAml(req: Request, res: Response, next: NextFunction) {
   try {
     const parsed = stellarAddressSchema.safeParse(req.params["address"]);
@@ -476,11 +678,6 @@ export async function clearUserAml(req: Request, res: Response, next: NextFuncti
   }
 }
 
-/**
- * GET /api/v1/admin/compliance/flagged-users
- *
- * Returns all users where aml_flagged = true. Admin only. (#799)
- */
 export async function getFlaggedUsers(_req: Request, res: Response, next: NextFunction) {
   try {
     const rows = await query<{
@@ -514,12 +711,6 @@ export async function getFlaggedUsers(_req: Request, res: Response, next: NextFu
   }
 }
 
-/**
- * GET /api/v1/admin/compliance/positions-snapshot
- *
- * Returns all user vault positions as of a given timestamp using
- * share_balance_snapshots. Supports contractId filter and CSV output. (#800)
- */
 export async function getPositionsSnapshot(req: Request, res: Response, next: NextFunction) {
   try {
     const asOfParam = req.query["asOf"] as string | undefined;
@@ -593,4 +784,51 @@ export async function getPositionsSnapshot(req: Request, res: Response, next: Ne
   } catch (err) {
     next(err);
   }
+}
+
+export async function getJobStatus(req: Request, res: Response, next: NextFunction) {
+  try {
+    const jobId = req.params["jobId"] as string;
+
+    const job = await jobQueue.getJob(jobId);
+    if (!job) {
+      res.status(404).json({ error: "NotFound", message: "Job not found" });
+      return;
+    }
+
+    res.json({
+      id: job.id,
+      name: job.name,
+      state: job.state,
+      createdAt: job.createdOn,
+      completedOn: job.completedOn,
+      output: job.output,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getFailedJobs(_req: Request, res: Response, next: NextFunction) {
+  try {
+    const jobs = await jobQueue.getFailedJobs(50);
+
+    res.json({
+      data: jobs.map((job) => ({
+        id: job.id,
+        name: job.name,
+        payload: job.data,
+        createdAt: job.createdOn,
+        completedAt: job.completedOn,
+        output: job.output,
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** SSE stream of indexer tick progress (#757). */
+export function streamIndexerProgress(req: Request, res: Response): void {
+  sseManager.addIndexerClient(req, res);
 }

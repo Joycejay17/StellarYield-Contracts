@@ -1,7 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { sseService } from "../../services/sse.js";
-import { logger } from "../../logger.js";
 
 const streamQuerySchema = z.object({
   contractId: z.string().optional(),

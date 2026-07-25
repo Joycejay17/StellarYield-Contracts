@@ -104,6 +104,16 @@ const envSchema = z.object({
   INTERNAL_SECRET: z
     .string()
     .default(""),
+  CORS_MAX_AGE: z
+    .string()
+    .default("600")
+    .transform((v) => parseInt(v, 10))
+    .pipe(z.number().int().min(0)),
+  SSE_HEARTBEAT_MS: z
+    .string()
+    .default("15000")
+    .transform((v) => parseInt(v, 10))
+    .pipe(z.number().int().min(1)),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -163,4 +173,9 @@ export const config = {
 
   requestBodyLimit: parsed.data.REQUEST_BODY_LIMIT,
   internalSecret: parsed.data.INTERNAL_SECRET,
+
+  cors: {
+    maxAge: parsed.data.CORS_MAX_AGE,
+  },
+  sseHeartbeatMs: parsed.data.SSE_HEARTBEAT_MS,
 } as const;

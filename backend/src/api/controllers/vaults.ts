@@ -4,6 +4,8 @@ import { z } from "zod";
 import { VaultService } from "../../services/vault.js";
 import { readTotalAssets, readVaultState, readPaused, readCooperator, readCooperatorFeeBps } from "../../services/stellar.js";
 import { query } from "../../db/index.js";
+import { AppError, ErrorCode } from "../middleware/errors.js";
+import { sseManager } from "../../services/sseManager.js";
 
 const vaultService = new VaultService();
 const contractAddressSchema = z.string().length(56).regex(/^C[A-Z2-7]{55}$/);
@@ -33,6 +35,10 @@ export async function listVaults(req: Request, res: Response, next: NextFunction
       cursor,
       sort,
       order,
+      createdFrom,
+      createdTo,
+      minTotalAssets,
+      maxTotalAssets,
       q,
     } = req.query as unknown as {
       page: number;
@@ -40,11 +46,28 @@ export async function listVaults(req: Request, res: Response, next: NextFunction
       state?: string;
       category?: string;
       cursor?: string;
-      sort: "created_at" | "total_assets";
-      order: "asc" | "desc";
+      sort?: string;
+      order?: "asc" | "desc";
+      createdFrom?: string;
+      createdTo?: string;
+      minTotalAssets?: string;
+      maxTotalAssets?: string;
       q?: string;
     };
-    const result = await vaultService.listVaults({ page, pageSize, state, category, cursor, sort, order, q });
+    const result = await vaultService.listVaults({
+      page,
+      pageSize,
+      state,
+      category,
+      cursor,
+      sort,
+      order,
+      createdFrom,
+      createdTo,
+      minTotalAssets,
+      maxTotalAssets,
+      q,
+    });
     setCacheHeaders(res);
     res.json(result);
   } catch (err) {
@@ -110,29 +133,23 @@ export async function getVault(req: Request, res: Response, next: NextFunction) 
   }
 }
 
-export async function getVaultLiveState(req: Request, res: Response, _next: NextFunction) {
+export async function getVaultLiveState(req: Request, res: Response, next: NextFunction) {
   try {
     const contractId = String(req.params["contractId"]);
     const state = await readVaultState(contractId);
     const paused = await readPaused(contractId);
     res.json({ state, paused });
   } catch (_err) {
-    res.status(500).json({
-      error: "RpcError",
-      message: "Failed to read live vault state from chain",
-    });
+    next(new AppError(ErrorCode.RPC_ERROR, "Failed to read live vault state from chain", 500));
   }
 }
 
-export async function getVaultLiveTotalAssets(req: Request, res: Response, _next: NextFunction) {
+export async function getVaultLiveTotalAssets(req: Request, res: Response, next: NextFunction) {
   try {
     const totalAssets = await readTotalAssets(String(req.params["contractId"]));
     res.json({ totalAssets: totalAssets.toString() });
   } catch (_err) {
-    res.status(500).json({
-      error: "RpcError",
-      message: "Failed to read live total assets from chain",
-    });
+    next(new AppError(ErrorCode.RPC_ERROR, "Failed to read live total assets from chain", 500));
   }
 }
 
@@ -1251,4 +1268,26 @@ export async function getCooperatorFees(req: Request, res: Response, next: NextF
   } catch (err) {
     next(err);
   }
+}
+
+/**
+ * SSE stream of vault events (#758). Optionally filtered to a comma-separated
+ * list of contract IDs via `?contractIds=`.
+ */
+export function streamVaultEvents(req: Request, res: Response): void {
+  const raw = typeof req.query["contractIds"] === "string" ? req.query["contractIds"] : undefined;
+
+  let contractIds: Set<string> | undefined;
+  if (raw) {
+    const ids = raw.split(",").map((id) => id.trim()).filter(Boolean);
+    for (const id of ids) {
+      if (!contractAddressSchema.safeParse(id).success) {
+        res.status(400).json({ error: "Bad Request", message: `Invalid contract ID format: ${id}` });
+        return;
+      }
+    }
+    contractIds = new Set(ids);
+  }
+
+  sseManager.addVaultClient(req, res, contractIds);
 }

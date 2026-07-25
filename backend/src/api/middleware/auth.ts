@@ -26,7 +26,7 @@ function getClientIp(req: Request): string {
   if (Array.isArray(forwarded) && forwarded.length > 0) {
     return forwarded[0].trim();
   }
-  return req.socket.remoteAddress ?? "unknown";
+  return req.socket?.remoteAddress ?? "unknown";
 }
 
 export function requireApiKey(options?: { role?: string; minRole?: "readonly" | "admin" }) {

@@ -3,6 +3,7 @@ import { Router } from "express";
 import { pool } from "../../db/index.js";
 import { config } from "../../config.js";
 import { readTotalVaults } from "../../services/stellar.js";
+import { sseManager } from "../../services/sseManager.js";
 
 const { version } = JSON.parse(
   readFileSync(new URL("../../../package.json", import.meta.url), "utf-8"),
@@ -45,11 +46,12 @@ healthRouter.get("/", async (_req, res) => {
     reachable: contractId !== null && (await checkFactoryReachable(contractId)),
     contractId,
   };
+  const sseConnections = sseManager.getSseConnectionCount();
 
   try {
     await pool.query("SELECT 1");
-    res.json({ version, status: "ok", dbPool, factory });
+    res.json({ version, status: "ok", dbPool, factory, sseConnections });
   } catch {
-    res.status(503).json({ version, status: "error", dbPool, factory });
+    res.status(503).json({ version, status: "error", dbPool, factory, sseConnections });
   }
 });

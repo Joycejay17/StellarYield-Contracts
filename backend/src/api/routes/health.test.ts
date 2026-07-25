@@ -16,6 +16,10 @@ vi.mock("../../services/stellar.js", () => ({
   readTotalVaults: readTotalVaultsMock,
 }));
 
+vi.mock("../../services/sseManager.js", () => ({
+  sseManager: { getSseConnectionCount: vi.fn().mockReturnValue(0) },
+}));
+
 async function buildApp() {
   const { healthRouter } = await import("./health.js");
   const app = express();
