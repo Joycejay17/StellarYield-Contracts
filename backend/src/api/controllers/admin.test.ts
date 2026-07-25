@@ -16,6 +16,7 @@ vi.mock("../../services/jobQueue.js", () => ({
   jobQueue: {
     getJob: vi.fn(),
     getFailedJobs: vi.fn(),
+    send: vi.fn().mockResolvedValue("job-123"),
   },
 }));
 vi.mock("../../services/vault.js", () => ({
@@ -205,6 +206,38 @@ describe("Admin Controller", () => {
       await getAdminStats(req, res, next);
 
       expect(res.json).toHaveBeenCalledWith({ vaultCount: 2, userCount: 42, totalValueLocked: "12345", epochCount: 3 });
+    });
+  });
+
+  describe("backfillIndexer", () => {
+    it("enqueues a job on the job queue with the requested range and returns its ID", async () => {
+      const { backfillIndexer } = await import("./admin.js");
+      const { jobQueue } = await import("../../services/jobQueue.js");
+      (jobQueue.send as ReturnType<typeof vi.fn>).mockResolvedValueOnce("job-456");
+
+      const req = { body: { fromLedger: 5, toLedger: 15 }, headers: {}, apiKey: undefined } as any;
+      const res = { status: vi.fn().mockReturnThis(), json: vi.fn() } as any;
+      const next = vi.fn();
+
+      await backfillIndexer(req, res, next);
+
+      expect(jobQueue.send).toHaveBeenCalledWith("indexer-backfill", { fromLedger: 5, toLedger: 15 });
+      expect(res.status).toHaveBeenCalledWith(202);
+      expect(res.json).toHaveBeenCalledWith({ queued: true, fromLedger: 5, toLedger: 15, jobId: "job-456" });
+    });
+
+    it("returns 400 without enqueueing when fromLedger >= toLedger", async () => {
+      const { backfillIndexer } = await import("./admin.js");
+      const { jobQueue } = await import("../../services/jobQueue.js");
+
+      const req = { body: { fromLedger: 20, toLedger: 10 }, headers: {}, apiKey: undefined } as any;
+      const res = { status: vi.fn().mockReturnThis(), json: vi.fn() } as any;
+      const next = vi.fn();
+
+      await backfillIndexer(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(jobQueue.send).not.toHaveBeenCalled();
     });
   });
 

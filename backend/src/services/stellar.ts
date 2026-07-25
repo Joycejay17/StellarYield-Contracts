@@ -70,6 +70,15 @@ async function simulateRead<T>(
 }
 
 /**
+ * Read the total number of vaults deployed by the factory contract.
+ * Lightweight view call used to check factory reachability (#844).
+ */
+export async function readTotalVaults(contractId: string): Promise<number> {
+  const value = await simulateRead<number>(contractId, "vault_count");
+  return Number(value ?? 0);
+}
+
+/**
  * Read the current vault state from the contract.
  * Returns one of: "Funding" | "Active" | "Matured" | "Closed" | "Cancelled"
  *
