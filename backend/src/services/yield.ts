@@ -5,6 +5,14 @@ import { cacheGet, cacheSet, cacheDel } from "../cache/redis.js";
 const EPOCHS_CACHE_TTL = 30;
 const PENDING_YIELD_CACHE_TTL = 10;
 
+/** Yield amount range filters for the epoch list endpoint (#858). */
+export interface EpochFilterOptions {
+  /** Inclusive lower bound on `yield_amount`, as a non-negative integer string. */
+  minYield?: string;
+  /** Inclusive upper bound on `yield_amount`, as a non-negative integer string. */
+  maxYield?: string;
+}
+
 export class YieldService {
   private formatYieldPerShare(yieldAmount: string, totalShares: string): string {
     const yieldBig = BigInt(yieldAmount);
@@ -19,8 +27,28 @@ export class YieldService {
     return `${integer}.${fraction}`;
   }
 
-  async getVaultEpochs(contractId: string): Promise<Epoch[]> {
-    const cacheKey = `epochs:${contractId}`;
+  async getVaultEpochs(contractId: string, filters: EpochFilterOptions = {}): Promise<Epoch[]> {
+    const { minYield, maxYield } = filters;
+
+    // Yield range (#858). Bounds are bound parameters cast to NUMERIC, so large
+    // amounts keep full precision. Either bound may be omitted for an open-ended
+    // filter. The params array stays [contractId] when neither is supplied.
+    const conditions: string[] = [];
+    const params: unknown[] = [contractId];
+    if (minYield !== undefined) {
+      params.push(minYield);
+      conditions.push(`e.yield_amount >= $${params.length}::numeric`);
+    }
+    if (maxYield !== undefined) {
+      params.push(maxYield);
+      conditions.push(`e.yield_amount <= $${params.length}::numeric`);
+    }
+    const yieldFilterSql = conditions.length > 0 ? ` AND ${conditions.join(" AND ")}` : "";
+
+    // The filters are part of the cache key so a filtered result is never served
+    // for a differently-filtered (or unfiltered) request. Invalidation uses the
+    // `epochs:*` wildcard, which still matches these keys.
+    const cacheKey = `epochs:${contractId}:${minYield ?? ""}:${maxYield ?? ""}`;
     const cached = await cacheGet<Epoch[]>(cacheKey);
     if (cached) return cached;
 
@@ -31,13 +59,23 @@ export class YieldService {
       yield_amount: string;
       total_shares: string;
       distributed_at: Date | null;
+      net_yield: string | null;
     }>(
-      `SELECT e.id, e.vault_id, e.epoch, e.yield_amount, e.total_shares, e.distributed_at
+      `SELECT e.id, e.vault_id, e.epoch, e.yield_amount, e.total_shares, e.distributed_at,
+              (ie.payload->>'netYield') AS net_yield
        FROM epochs e
        JOIN vaults v ON e.vault_id = v.id
-       WHERE v.contract_id = $1
+       LEFT JOIN LATERAL (
+         SELECT payload FROM indexed_events
+         WHERE contract_id = v.contract_id
+           AND event_type = 'yield_distributed'
+           AND (payload->>'epoch')::int = e.epoch
+         ORDER BY created_at DESC
+         LIMIT 1
+       ) ie ON TRUE
+       WHERE v.contract_id = $1${yieldFilterSql}
        ORDER BY e.epoch ASC`,
-      [contractId],
+      params,
     );
 
     const epochs = rows.map((row) => ({
@@ -47,10 +85,182 @@ export class YieldService {
       yieldAmount: row.yield_amount,
       totalShares: row.total_shares,
       distributedAt: row.distributed_at,
+      netYield: row.net_yield ?? row.yield_amount,
     }));
 
     await cacheSet(cacheKey, epochs, EPOCHS_CACHE_TTL);
     return epochs;
+  }
+
+  /**
+   * Fetch a single epoch's detail for a vault (#815).
+   * Returns null if the vault or the epoch does not exist for it.
+   */
+  async getEpochDetail(
+    contractId: string,
+    epoch: number,
+  ): Promise<{
+    epoch: number;
+    yieldAmount: string;
+    totalShares: string;
+    yieldPerShare: string;
+    netYield: string;
+    distributedAt: string | null;
+  } | null> {
+    const rows = await query<{
+      epoch: number;
+      yield_amount: string;
+      total_shares: string;
+      distributed_at: Date | null;
+      net_yield: string | null;
+    }>(
+      `SELECT e.epoch, e.yield_amount, e.total_shares, e.distributed_at,
+              (ie.payload->>'netYield') AS net_yield
+       FROM epochs e
+       JOIN vaults v ON e.vault_id = v.id
+       LEFT JOIN LATERAL (
+         SELECT payload FROM indexed_events
+         WHERE contract_id = v.contract_id
+           AND event_type = 'yield_distributed'
+           AND (payload->>'epoch')::int = e.epoch
+         ORDER BY created_at DESC
+         LIMIT 1
+       ) ie ON TRUE
+       WHERE v.contract_id = $1 AND e.epoch = $2`,
+      [contractId, epoch],
+    );
+
+    const row = rows[0];
+    if (!row) return null;
+
+    return {
+      epoch: row.epoch,
+      yieldAmount: row.yield_amount,
+      totalShares: row.total_shares,
+      yieldPerShare: this.formatYieldPerShare(row.yield_amount, row.total_shares),
+      netYield: row.net_yield ?? row.yield_amount,
+      distributedAt: row.distributed_at ? row.distributed_at.toISOString() : null,
+    };
+  }
+
+  /**
+   * Claimed amount for an epoch, summed from `yield_claimed` and
+   * `yield_claimed_partial` indexed events (#816, #817).
+   */
+  async getEpochClaimStats(
+    contractId: string,
+    epoch: number,
+  ): Promise<{ claimedAmount: string; uniqueClaimants: number }> {
+    const rows = await query<{ claimed_amount: string; unique_claimants: string }>(
+      `SELECT COALESCE(SUM((payload->>'amount')::numeric), 0)::text AS claimed_amount,
+              COUNT(DISTINCT payload->>'user')::text AS unique_claimants
+       FROM indexed_events
+       WHERE contract_id = $1
+         AND event_type IN ('yield_claimed', 'yield_claimed_partial')
+         AND (payload->>'epoch')::int = $2`,
+      [contractId, epoch],
+    );
+
+    return {
+      claimedAmount: rows[0]?.claimed_amount ?? "0",
+      uniqueClaimants: parseInt(rows[0]?.unique_claimants ?? "0", 10),
+    };
+  }
+
+  /** Derives epoch status by comparing claimed amount to the yield amount (#816). */
+  deriveEpochStatus(
+    yieldAmount: string,
+    claimedAmount: string,
+  ): "open" | "partially_claimed" | "fully_claimed" {
+    const yieldBig = BigInt(yieldAmount);
+    const claimedBig = BigInt(claimedAmount);
+    if (claimedBig <= BigInt(0)) return "open";
+    if (claimedBig >= yieldBig) return "fully_claimed";
+    return "partially_claimed";
+  }
+
+  /**
+   * Total holders at an epoch's snapshot, from `share_balance_snapshots` (#817).
+   * Falls back to current holders with a position if no snapshot rows exist
+   * for the epoch (e.g. epoch 0 before snapshots were being recorded).
+   */
+  async getEpochHolderCount(contractId: string, epoch: number): Promise<number> {
+    const rows = await query<{ holder_count: string }>(
+      `SELECT COUNT(DISTINCT sbs.user_address)::text AS holder_count
+       FROM share_balance_snapshots sbs
+       JOIN vaults v ON sbs.vault_id = v.id
+       WHERE v.contract_id = $1 AND sbs.epoch = $2 AND sbs.shares::numeric > 0`,
+      [contractId, epoch],
+    );
+
+    const holderCount = parseInt(rows[0]?.holder_count ?? "0", 10);
+    if (holderCount > 0) return holderCount;
+
+    const fallbackRows = await query<{ holder_count: string }>(
+      `SELECT COUNT(*)::text AS holder_count
+       FROM user_vault_positions uvp
+       JOIN vaults v ON uvp.vault_id = v.id
+       WHERE v.contract_id = $1 AND uvp.shares::numeric > 0`,
+      [contractId],
+    );
+
+    return parseInt(fallbackRows[0]?.holder_count ?? "0", 10);
+  }
+
+  /**
+   * Claim stats for every epoch of a vault in one query, keyed by epoch
+   * number. Used by the epoch list endpoint to avoid N+1 queries (#816, #817).
+   */
+  async getClaimStatsForVault(
+    contractId: string,
+  ): Promise<Map<number, { claimedAmount: string; uniqueClaimants: number }>> {
+    const rows = await query<{ epoch: number; claimed_amount: string; unique_claimants: string }>(
+      `SELECT (payload->>'epoch')::int AS epoch,
+              COALESCE(SUM((payload->>'amount')::numeric), 0)::text AS claimed_amount,
+              COUNT(DISTINCT payload->>'user')::text AS unique_claimants
+       FROM indexed_events
+       WHERE contract_id = $1
+         AND event_type IN ('yield_claimed', 'yield_claimed_partial')
+       GROUP BY (payload->>'epoch')::int`,
+      [contractId],
+    );
+
+    const stats = new Map<number, { claimedAmount: string; uniqueClaimants: number }>();
+    for (const row of rows) {
+      stats.set(row.epoch, {
+        claimedAmount: row.claimed_amount,
+        uniqueClaimants: parseInt(row.unique_claimants, 10),
+      });
+    }
+    return stats;
+  }
+
+  /**
+   * Holder counts for every epoch snapshot of a vault in one query, keyed by
+   * epoch number (#817).
+   */
+  async getHolderCountsForVault(contractId: string): Promise<Map<number, number>> {
+    const rows = await query<{ epoch: number; holder_count: string }>(
+      `SELECT sbs.epoch, COUNT(DISTINCT sbs.user_address)::text AS holder_count
+       FROM share_balance_snapshots sbs
+       JOIN vaults v ON sbs.vault_id = v.id
+       WHERE v.contract_id = $1 AND sbs.shares::numeric > 0
+       GROUP BY sbs.epoch`,
+      [contractId],
+    );
+
+    const counts = new Map<number, number>();
+    for (const row of rows) {
+      counts.set(row.epoch, parseInt(row.holder_count, 10));
+    }
+    return counts;
+  }
+
+  /** participationRate = (unique claimants / total holders at snapshot) × 100, 2dp (#817). */
+  calculateParticipationRate(uniqueClaimants: number, totalHolders: number): number {
+    if (totalHolders <= 0) return 0;
+    const rate = (uniqueClaimants / totalHolders) * 100;
+    return Math.round(rate * 100) / 100;
   }
 
   async getUserPendingYield(

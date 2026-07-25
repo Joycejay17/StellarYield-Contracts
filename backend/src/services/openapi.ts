@@ -139,8 +139,32 @@ function registerPaths(): void {
         page: z.coerce.number().optional(),
         pageSize: z.coerce.number().optional(),
         state: z.string().optional(),
-        sort: z.enum(["created_at", "total_assets"]).optional(),
+        sort: z
+          .string()
+          .optional()
+          .describe(
+            "Comma-separated list of up to 3 `field[:direction]` pairs, e.g. " +
+              "`state:asc,total_assets:desc`. Allowed fields: created_at, updated_at, " +
+              "total_assets, total_supply, state, name. A field with no explicit " +
+              "direction inherits `order`.",
+          ),
         order: z.enum(["asc", "desc"]).optional(),
+        createdFrom: z
+          .string()
+          .optional()
+          .describe("Inclusive lower bound on creation date (ISO 8601 date or date-time)."),
+        createdTo: z
+          .string()
+          .optional()
+          .describe("Inclusive upper bound on creation date (ISO 8601 date or date-time)."),
+        minTotalAssets: z
+          .string()
+          .optional()
+          .describe("Inclusive lower bound on total assets, as a non-negative integer string."),
+        maxTotalAssets: z
+          .string()
+          .optional()
+          .describe("Inclusive upper bound on total assets, as a non-negative integer string."),
       }),
     },
     responses: {
@@ -283,6 +307,54 @@ function registerPaths(): void {
 
   registry.registerPath({
     method: "get",
+    path: "/api/v1/vaults/{contractId}/fees",
+    summary: "Get operator fee summary per vault",
+    tags: ["Vaults"],
+    parameters: [{ name: "contractId", in: "path", required: true, schema: { type: "string" } }],
+    responses: {
+      200: {
+        description: "Vault fee summary",
+        content: {
+          "application/json": {
+            schema: z.object({
+              totalOperatorFees: z.string(),
+              epochCount: z.number(),
+              averageFeePerEpoch: z.string(),
+              feeBps: z.number(),
+              earlyRedemptionFeeRevenue: z.string(),
+            }),
+          },
+        },
+      },
+      404: { description: "Vault not found", content: { "application/json": { schema: errorResponseSchema } } },
+    },
+  });
+
+  registry.registerPath({
+    method: "get",
+    path: "/api/v1/vaults/{contractId}/fees/cooperator",
+    summary: "Get cooperator fee breakdown per vault",
+    tags: ["Vaults"],
+    parameters: [{ name: "contractId", in: "path", required: true, schema: { type: "string" } }],
+    responses: {
+      200: {
+        description: "Cooperator fee breakdown",
+        content: {
+          "application/json": {
+            schema: z.object({
+              cooperatorAddress: z.string(),
+              cooperatorFeeBps: z.number(),
+              totalCooperatorFees: z.string(),
+            }),
+          },
+        },
+      },
+      404: { description: "Vault not found", content: { "application/json": { schema: errorResponseSchema } } },
+    },
+  });
+
+  registry.registerPath({
+    method: "get",
     path: "/api/v1/users/{address}",
     summary: "Get user by address",
     tags: ["Users"],
@@ -349,6 +421,28 @@ function registerPaths(): void {
     tags: ["Admin"],
     responses: {
       200: { description: "Admin statistics", content: { "application/json": { schema: adminStatsSchema } } },
+    },
+  });
+
+  registry.registerPath({
+    method: "get",
+    path: "/api/v1/admin/fees",
+    summary: "Get platform-wide fee analytics (requires API key)",
+    tags: ["Admin"],
+    responses: {
+      200: {
+        description: "Platform fee analytics",
+        content: {
+          "application/json": {
+            schema: z.object({
+              totalOperatorFees: z.string(),
+              totalEarlyRedemptionFees: z.string(),
+              totalPlatformRevenue: z.string(),
+              topFeeVaults: z.array(z.object({ contractId: z.string(), totalFees: z.string() })),
+            }),
+          },
+        },
+      },
     },
   });
 

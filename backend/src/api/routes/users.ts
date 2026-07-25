@@ -1,15 +1,20 @@
 import { Router } from "express";
 import { z } from "zod";
 import {
+  exportUserData,
   getKycBatch,
   getPortfoliosBatch,
   getUser,
+  getUserIncomeForecast,
   getUserKyc,
   getUserKycHistory,
   getUserPortfolio,
+  getUserPortfolioPnl,
   getUserShareHistory,
   getUserYieldHistory,
+  getUserYieldSummary,
   searchUsers,
+  streamUserPositions,
 } from "../controllers/users.js";
 import {
   validateBody,
@@ -17,6 +22,7 @@ import {
   validateQuery,
   stellarAddressSchema,
 } from "../middleware/validate.js";
+import { requireApiKey } from "../middleware/auth.js";
 
 export const usersRouter = Router();
 
@@ -73,6 +79,12 @@ usersRouter.post(
   getKycBatch,
 );
 usersRouter.get(
+  "/:address/data-export",
+  requireApiKey({ role: "admin" }),
+  validateParams(addressParamSchema),
+  exportUserData,
+);
+usersRouter.get(
   "/:address/kyc",
   validateParams(addressParamSchema),
   validateQuery(kycQuerySchema),
@@ -83,6 +95,11 @@ usersRouter.get(
   validateParams(addressParamSchema),
   validateQuery(yieldHistoryQuerySchema),
   getUserYieldHistory,
+);
+usersRouter.get(
+  "/:address/yield-summary",
+  validateParams(addressParamSchema),
+  getUserYieldSummary,
 );
 usersRouter.get(
   "/:address/kyc-history",
@@ -101,4 +118,19 @@ usersRouter.get(
   "/:address/portfolio",
   validateParams(addressParamSchema),
   getUserPortfolio,
+);
+usersRouter.get(
+  "/:address/portfolio/pnl",
+  validateParams(addressParamSchema),
+  getUserPortfolioPnl,
+);
+usersRouter.get(
+  "/:address/portfolio/income-forecast",
+  validateParams(addressParamSchema),
+  getUserIncomeForecast,
+);
+usersRouter.get(
+  "/:address/stream",
+  validateParams(addressParamSchema),
+  streamUserPositions,
 );
