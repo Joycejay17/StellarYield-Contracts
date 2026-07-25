@@ -21,6 +21,10 @@ vi.mock("../../services/vault.js", () => ({
 vi.mock("../../services/stellar.js", () => ({
   readTotalSupply: vi.fn().mockResolvedValue(0n),
 }));
+vi.mock("../../queue/boss.js", () => ({
+  boss: { send: vi.fn().mockResolvedValue("job-123") },
+  INDEXER_BACKFILL_QUEUE: "indexer-backfill",
+}));
 vi.mock("pino-http", () => ({ pinoHttp: () => (_req: any, _res: any, next: any) => next() }));
 
 async function getTestContext() {
@@ -64,6 +68,38 @@ describe("Admin Controller", () => {
       await getAdminStats(req, res, next);
 
       expect(res.json).toHaveBeenCalledWith({ vaultCount: 2, userCount: 42, totalValueLocked: "12345", epochCount: 3 });
+    });
+  });
+
+  describe("backfillIndexer", () => {
+    it("enqueues a pg-boss job with the requested range and returns its ID", async () => {
+      const { backfillIndexer } = await import("./admin.js");
+      const { boss } = await import("../../queue/boss.js");
+      (boss.send as ReturnType<typeof vi.fn>).mockResolvedValueOnce("job-456");
+
+      const req = { body: { fromLedger: 5, toLedger: 15 } } as any;
+      const res = { status: vi.fn().mockReturnThis(), json: vi.fn() } as any;
+      const next = vi.fn();
+
+      await backfillIndexer(req, res, next);
+
+      expect(boss.send).toHaveBeenCalledWith("indexer-backfill", { fromLedger: 5, toLedger: 15 });
+      expect(res.status).toHaveBeenCalledWith(202);
+      expect(res.json).toHaveBeenCalledWith({ queued: true, fromLedger: 5, toLedger: 15, jobId: "job-456" });
+    });
+
+    it("returns 400 without enqueueing when fromLedger >= toLedger", async () => {
+      const { backfillIndexer } = await import("./admin.js");
+      const { boss } = await import("../../queue/boss.js");
+
+      const req = { body: { fromLedger: 20, toLedger: 10 } } as any;
+      const res = { status: vi.fn().mockReturnThis(), json: vi.fn() } as any;
+      const next = vi.fn();
+
+      await backfillIndexer(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(boss.send).not.toHaveBeenCalled();
     });
   });
 

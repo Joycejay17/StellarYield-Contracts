@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import { query } from "../../db/index.js";
 import { indexer } from "../../services/indexerSingleton.js";
 import { logger } from "../../logger.js";
+import { boss, INDEXER_BACKFILL_QUEUE } from "../../queue/boss.js";
 import { z } from "zod";
 
 const stellarAddressSchema = z.string().length(56).regex(/^G[A-Z2-7]{55}$/);
@@ -64,13 +65,12 @@ export async function backfillIndexer(req: Request, res: Response, next: NextFun
       return;
     }
 
-    // Queue the backfill asynchronously (non-blocking)
-    indexer.queueBackfill(fromLedger, toLedger).catch((err) => {
-      logger.error({ err }, "Backfill error");
-    });
+    // Persist the backfill range as a pg-boss job so it survives a process
+    // restart, instead of the old in-memory queue (#845, #846).
+    const jobId = await boss.send(INDEXER_BACKFILL_QUEUE, { fromLedger, toLedger });
 
     // Return 202 Accepted immediately
-    res.status(202).json({ queued: true, fromLedger, toLedger });
+    res.status(202).json({ queued: true, fromLedger, toLedger, jobId });
   } catch (err) {
     next(err);
   }
