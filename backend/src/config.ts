@@ -10,7 +10,7 @@ const envSchema = z.object({
     .string()
     .default("development"),
   STELLAR_NETWORK: z
-    .string()
+    .enum(["testnet", "mainnet", "futurenet"])
     .default("testnet"),
   STELLAR_RPC_URL: z
     .string()
@@ -18,9 +18,17 @@ const envSchema = z.object({
     .refine((v) => v.startsWith("https://"), {
       message: "STELLAR_RPC_URL must use HTTPS",
     }),
+  STELLAR_RPC_FALLBACKS: z
+    .string()
+    .default(""),
+  STELLAR_RPC_TIMEOUT_MS: z
+    .string()
+    .default("10000")
+    .transform((v) => parseInt(v, 10))
+    .pipe(z.number().int().min(1000)),
   STELLAR_NETWORK_PASSPHRASE: z
     .string()
-    .default("Test SDF Network ; September 2015"),
+    .optional(),
   VAULT_FACTORY_CONTRACT_ID: z
     .string()
     .default(""),
@@ -98,6 +106,9 @@ const envSchema = z.object({
     .default("90")
     .transform((v) => parseInt(v, 10))
     .pipe(z.number().int().min(1)),
+  ADMIN_IP_ALLOWLIST: z
+    .string()
+    .default(""),
   REQUEST_BODY_LIMIT: z
     .string()
     .default("100kb"),
@@ -127,6 +138,17 @@ if (!parsed.success) {
   process.exit(1);
 }
 
+// Must be declared before `config` so `getDefaultPassphrase` can use them.
+const NETWORK_PASSPHRASES: Record<string, string> = {
+  testnet: "Test SDF Network ; September 2015",
+  mainnet: "Public Global Stellar Network ; September 2015",
+  futurenet: "Test SDF Future Network ; October 2022",
+};
+
+function getDefaultPassphrase(network: string): string {
+  return NETWORK_PASSPHRASES[network] ?? NETWORK_PASSPHRASES.testnet;
+}
+
 export const config = {
   port: parsed.data.PORT,
   nodeEnv: parsed.data.NODE_ENV,
@@ -134,7 +156,12 @@ export const config = {
   stellar: {
     network: parsed.data.STELLAR_NETWORK,
     rpcUrl: parsed.data.STELLAR_RPC_URL,
-    networkPassphrase: parsed.data.STELLAR_NETWORK_PASSPHRASE,
+    rpcFallbacks: parsed.data.STELLAR_RPC_FALLBACKS
+      ? parsed.data.STELLAR_RPC_FALLBACKS.split(",").map((s) => s.trim()).filter(Boolean)
+      : [],
+    rpcTimeoutMs: parsed.data.STELLAR_RPC_TIMEOUT_MS,
+    networkPassphrase: parsed.data.STELLAR_NETWORK_PASSPHRASE
+      ?? getDefaultPassphrase(parsed.data.STELLAR_NETWORK),
     vaultFactoryContractId: parsed.data.VAULT_FACTORY_CONTRACT_ID,
   },
 
@@ -170,6 +197,10 @@ export const config = {
   },
 
   eventsRetentionDays: parsed.data.EVENTS_RETENTION_DAYS,
+
+  adminIpAllowlist: parsed.data.ADMIN_IP_ALLOWLIST
+    ? parsed.data.ADMIN_IP_ALLOWLIST.split(",").map((s) => s.trim()).filter(Boolean)
+    : [],
 
   requestBodyLimit: parsed.data.REQUEST_BODY_LIMIT,
   internalSecret: parsed.data.INTERNAL_SECRET,

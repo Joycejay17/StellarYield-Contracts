@@ -24,9 +24,11 @@ import {
   streamIndexerProgress,
 } from "../controllers/admin.js";
 import { requireApiKey } from "../middleware/auth.js";
+import { ipAllowlist } from "../middleware/ipAllowlist.js";
 
 export const adminRouter = Router();
 
+adminRouter.use(ipAllowlist());
 adminRouter.use(requireApiKey({ minRole: "readonly" }));
 
 adminRouter.get("/stats", getAdminStats);
