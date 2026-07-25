@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   getVaultEpochs,
   getEpochDetail,
+  getBulkEpochs,
   getUserPendingYield,
   getYieldSummary,
   getYieldPerShareHistory,
@@ -55,6 +56,7 @@ export const yieldsRouter = Router();
 yieldsRouter.get("/stream", sseLimitPerIp(), getYieldsStream);
 yieldsRouter.get("/:contractId/summary", getYieldSummary);
 yieldsRouter.get("/:contractId/epochs", validateQuery(epochQuerySchema), getVaultEpochs);
+yieldsRouter.get("/:contractId/epochs/bulk", getBulkEpochs);
 yieldsRouter.get(
   "/:contractId/epochs/:epoch",
   validateParams(epochDetailParamsSchema),
