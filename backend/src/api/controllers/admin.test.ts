@@ -16,6 +16,7 @@ vi.mock("../../services/jobQueue.js", () => ({
   jobQueue: {
     getJob: vi.fn(),
     getFailedJobs: vi.fn(),
+    send: vi.fn().mockResolvedValue("job-123"),
   },
 }));
 vi.mock("../../services/vault.js", () => ({
@@ -50,6 +51,141 @@ describe("Admin Controller", () => {
     vi.clearAllMocks();
   });
 
+  it("returns per-vault fee metrics ordered by total fees and applies date filters", async () => {
+    const { query } = await import("../../db/index.js");
+    const { getAdminFeesDashboard } = await import("./admin.js");
+    const mockQuery = query as ReturnType<typeof vi.fn>;
+
+    mockQuery.mockResolvedValueOnce([
+      {
+        contract_id: "C1",
+        name: "Alpha Vault",
+        total_operator_fees: "2200",
+        epoch_count: "4",
+        fee_bps: 120,
+        last_epoch_fee: "200",
+      },
+      {
+        contract_id: "C2",
+        name: "Beta Vault",
+        total_operator_fees: "1500",
+        epoch_count: "2",
+        fee_bps: 80,
+        last_epoch_fee: "100",
+      },
+    ]);
+
+    const req = { query: { from: "2025-01-01", to: "2025-01-31" } } as any;
+    const res = { json: vi.fn() } as any;
+    const next = vi.fn();
+
+    await getAdminFeesDashboard(req, res, next);
+
+    expect(mockQuery).toHaveBeenCalledWith(
+      expect.stringContaining("ORDER BY"),
+      expect.arrayContaining([expect.any(String), expect.any(String)]),
+    );
+    expect(res.json).toHaveBeenCalledWith([
+      {
+        contractId: "C1",
+        name: "Alpha Vault",
+        totalOperatorFees: "2200",
+        epochCount: 4,
+        feeBps: 120,
+        lastEpochFee: "200",
+      },
+      {
+        contractId: "C2",
+        name: "Beta Vault",
+        totalOperatorFees: "1500",
+        epochCount: 2,
+        feeBps: 80,
+        lastEpochFee: "100",
+      },
+    ]);
+  });
+
+  it("deletes a user and returns a redaction receipt", async () => {
+    const { query } = await import("../../db/index.js");
+    const { deleteUser } = await import("./admin.js");
+    const mockQuery = query as ReturnType<typeof vi.fn>;
+
+    mockQuery.mockImplementation((sql: string) => {
+      if (sql.includes("SELECT id FROM users")) {
+        return Promise.resolve([{ id: 1 }]);
+      }
+      if (sql.includes("UPDATE user_vault_positions")) {
+        return Promise.resolve([{ id: 10 }]);
+      }
+      if (sql.includes("UPDATE share_balance_snapshots")) {
+        return Promise.resolve([{ id: 20 }, { id: 21 }]);
+      }
+      if (sql.includes("UPDATE redemption_requests")) {
+        return Promise.resolve([]);
+      }
+      if (sql.includes("UPDATE indexed_events")) {
+        return Promise.resolve([]);
+      }
+      if (sql.includes("DELETE FROM users")) {
+        return Promise.resolve([]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const req = { params: { address: "GABCDEF" }, headers: {}, body: undefined } as any;
+    const res = { json: vi.fn(), status: vi.fn().mockReturnThis() } as any;
+    const next = vi.fn();
+
+    await deleteUser(req, res, next);
+
+    expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining("DELETE FROM users"), ["GABCDEF"]);
+    expect(mockQuery).toHaveBeenCalledWith(
+      expect.stringContaining("UPDATE indexed_events SET payload = jsonb_set(payload, '{user}'"),
+      ["GABCDEF"],
+    );
+    expect(mockQuery).toHaveBeenCalledWith(
+      expect.stringContaining("UPDATE indexed_events SET payload = jsonb_set(payload, '{address}'"),
+      ["GABCDEF"],
+    );
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      address: "GABCDEF",
+      deletedAt: expect.any(String),
+      recordsAffected: 3,
+    }));
+  });
+
+  it("returns paginated audit log entries ordered by creation time", async () => {
+    const { query } = await import("../../db/index.js");
+    const { getAdminAuditLog } = await import("./admin.js");
+    const mockQuery = query as ReturnType<typeof vi.fn>;
+
+    mockQuery.mockResolvedValueOnce([{ count: "1" }]);
+    mockQuery.mockResolvedValueOnce([
+      {
+        id: 1,
+        api_key_label: "ops",
+        action: "delete_api_key",
+        target: "/api/v1/admin/api-keys/1",
+        ip_address: "203.0.113.10",
+        request_body_hash: "abc123",
+        created_at: new Date("2025-01-01T00:00:00.000Z"),
+      },
+    ]);
+
+    const req = { query: { page: "1", pageSize: "20" } } as any;
+    const res = { json: vi.fn() } as any;
+    const next = vi.fn();
+
+    await getAdminAuditLog(req, res, next);
+
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.any(Array),
+      total: 1,
+      page: 1,
+      pageSize: 20,
+    }));
+  });
+
   // ── Unit tests (controller function directly) ─────────────────────────────
   describe("getAdminStats", () => {
     it("returns vault/user/epoch counts and TVL", async () => {
@@ -70,6 +206,38 @@ describe("Admin Controller", () => {
       await getAdminStats(req, res, next);
 
       expect(res.json).toHaveBeenCalledWith({ vaultCount: 2, userCount: 42, totalValueLocked: "12345", epochCount: 3 });
+    });
+  });
+
+  describe("backfillIndexer", () => {
+    it("enqueues a job on the job queue with the requested range and returns its ID", async () => {
+      const { backfillIndexer } = await import("./admin.js");
+      const { jobQueue } = await import("../../services/jobQueue.js");
+      (jobQueue.send as ReturnType<typeof vi.fn>).mockResolvedValueOnce("job-456");
+
+      const req = { body: { fromLedger: 5, toLedger: 15 }, headers: {}, apiKey: undefined } as any;
+      const res = { status: vi.fn().mockReturnThis(), json: vi.fn() } as any;
+      const next = vi.fn();
+
+      await backfillIndexer(req, res, next);
+
+      expect(jobQueue.send).toHaveBeenCalledWith("indexer-backfill", { fromLedger: 5, toLedger: 15 });
+      expect(res.status).toHaveBeenCalledWith(202);
+      expect(res.json).toHaveBeenCalledWith({ queued: true, fromLedger: 5, toLedger: 15, jobId: "job-456" });
+    });
+
+    it("returns 400 without enqueueing when fromLedger >= toLedger", async () => {
+      const { backfillIndexer } = await import("./admin.js");
+      const { jobQueue } = await import("../../services/jobQueue.js");
+
+      const req = { body: { fromLedger: 20, toLedger: 10 }, headers: {}, apiKey: undefined } as any;
+      const res = { status: vi.fn().mockReturnThis(), json: vi.fn() } as any;
+      const next = vi.fn();
+
+      await backfillIndexer(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(jobQueue.send).not.toHaveBeenCalled();
     });
   });
 

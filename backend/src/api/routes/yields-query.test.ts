@@ -6,6 +6,8 @@ import supertest from "supertest";
 // runs end-to-end without a real database.
 const mocks = vi.hoisted(() => ({
   getVaultEpochs: vi.fn(),
+  getClaimStatsForVault: vi.fn(),
+  getHolderCountsForVault: vi.fn(),
 }));
 
 vi.mock("../../db/index.js", () => ({
@@ -17,7 +19,13 @@ vi.mock("../../services/yield.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../services/yield.js")>();
   return {
     ...actual,
-    YieldService: vi.fn(() => ({ getVaultEpochs: mocks.getVaultEpochs })),
+    YieldService: vi.fn(() => ({
+      getVaultEpochs: mocks.getVaultEpochs,
+      getClaimStatsForVault: mocks.getClaimStatsForVault,
+      getHolderCountsForVault: mocks.getHolderCountsForVault,
+      deriveEpochStatus: actual.YieldService.prototype.deriveEpochStatus,
+      calculateParticipationRate: actual.YieldService.prototype.calculateParticipationRate,
+    })),
   };
 });
 
@@ -43,6 +51,8 @@ describe("GET /api/v1/yields/:contractId/epochs yield range validation (#858)", 
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getVaultEpochs.mockResolvedValue([]);
+    mocks.getClaimStatsForVault.mockResolvedValue(new Map());
+    mocks.getHolderCountsForVault.mockResolvedValue(new Map());
   });
 
   it("accepts a yield range and forwards both bounds as strings", async () => {

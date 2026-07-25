@@ -2,6 +2,7 @@ import { xdr, scValToNative } from "@stellar/stellar-sdk";
 import { config } from "../config.js";
 import { logger } from "../logger.js";
 import { query } from "../db/index.js";
+import { userServiceInstance } from "./userSingleton.js";
 import {
   getSorobanRpc,
   readRwaName,
@@ -14,6 +15,39 @@ import { NotificationService } from "./notifications.js";
 import { indexerEventsProcessedTotal, indexerLastLedger } from "./metrics.js";
 import { cacheDel } from "../cache/redis.js";
 import { sseService } from "./sse.js";
+import { recordRpcSuccess, recordRpcError } from "./rpcMonitor.js";
+
+// ── Lightweight trace spans (#827) ────────────────────────────────────────────
+// No external tracing dependency — spans are emitted as structured pino log
+// entries with traceId/spanId/parentSpanId so they can be correlated in any
+// log aggregator (Loki, CloudWatch, Datadog, etc.).
+
+let _spanSeq = 0;
+function nextSpanId(): string {
+  return (++_spanSeq).toString(16).padStart(8, "0");
+}
+
+interface Span {
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+  name: string;
+  startMs: number;
+  attrs: Record<string, unknown>;
+}
+
+function startSpan(name: string, attrs: Record<string, unknown> = {}, parent?: Span): Span {
+  const traceId = parent?.traceId ?? nextSpanId() + nextSpanId();
+  return { traceId, spanId: nextSpanId(), parentSpanId: parent?.spanId, name, startMs: Date.now(), attrs };
+}
+
+function finishSpan(span: Span, extra: Record<string, unknown> = {}): void {
+  const durationMs = Date.now() - span.startMs;
+  logger.debug(
+    { traceId: span.traceId, spanId: span.spanId, parentSpanId: span.parentSpanId, durationMs, ...span.attrs, ...extra },
+    span.name,
+  );
+}
 
 // ── Upstream helpers ───────────────────────────────────────────────────────────
 
@@ -58,8 +92,11 @@ async function withBackoff<T>(
   let attempt = 0;
   while (true) {
     try {
-      return await fn();
+      const result = await fn();
+      recordRpcSuccess();
+      return result;
     } catch (err: any) {
+      recordRpcError();
       const is429 =
         err?.response?.status === 429 ||
         err?.status === 429 ||
@@ -224,6 +261,7 @@ export class Indexer {
   }
 
   async tick(): Promise<void> {
+    const tickSpan = startSpan("indexer.tick");
     const server = getSorobanRpc();
 
     let latestLedger: number;
@@ -232,6 +270,7 @@ export class Indexer {
       latestLedger = resp.sequence;
     } catch (err) {
       logger.warn({ err }, "RPC error fetching latest ledger during tick");
+      finishSpan(tickSpan, { error: true });
       return;
     }
 
@@ -242,9 +281,14 @@ export class Indexer {
       logger.error(`Indexer lag: ${lag} ledgers behind chain tip`);
     }
 
-    if (latestLedger <= this.lastLedger) return;
+    if (latestLedger <= this.lastLedger) {
+      finishSpan(tickSpan, { ledgerRange: 0, eventCount: 0 });
+      return;
+    }
 
     const from = this.lastLedger + 1;
+    tickSpan.attrs["ledgerRange"] = `${from}-${latestLedger}`;
+
     const contractIds = Array.from(this.watchedContractIds);
     const filters = contractIds.length > 0
       ? contractIds.map((id) => ({ contractIds: [id] }))
@@ -258,8 +302,11 @@ export class Indexer {
       events = resp.events;
     } catch (err) {
       logger.warn({ err, from, to: latestLedger }, "RPC error fetching events during tick");
+      finishSpan(tickSpan, { error: true });
       return;
     }
+
+    tickSpan.attrs["eventCount"] = events.length;
 
     logger.info(
       { from, to: latestLedger, eventCount: events.length },
@@ -267,11 +314,7 @@ export class Indexer {
     );
 
     for (const event of events) {
-      logger.debug(
-        { contractId: event.contractId, type: event.type, ledger: event.ledger },
-        "Processing event",
-      );
-      await this.processEvent(event);
+      await this.processEvent(event, tickSpan);
     }
 
     await this.notificationService?.processRetries();
@@ -279,6 +322,7 @@ export class Indexer {
     this.lastLedger = latestLedger;
     await this.persistLastLedger();
     this.lastTickAt = new Date();
+    finishSpan(tickSpan);
   }
 
   private async backfill(tipLedger: number): Promise<void> {
@@ -324,7 +368,21 @@ export class Indexer {
     }
   }
 
-  async processEvent(event: any): Promise<void> {
+  async processEvent(event: any, parentSpan?: Span): Promise<void> {
+    const eventSpan = startSpan(
+      "indexer.process_event",
+      { eventType: event.type ?? "unknown", contractId: event.contractId ?? "" },
+      parentSpan,
+    );
+
+    try {
+      await this._processEventInner(event);
+    } finally {
+      finishSpan(eventSpan);
+    }
+  }
+
+  private async _processEventInner(event: any): Promise<void> {
     const existing = await query(
       "SELECT id FROM indexed_events WHERE tx_hash = $1 AND contract_id = $2 AND event_type = $3 AND ledger = $4",
       [event.id ?? event.txHash ?? "", event.contractId ?? "", event.type ?? "", event.ledger ?? 0],
@@ -821,7 +879,6 @@ export class Indexer {
       { contractId, epoch: yieldDist.epoch, amount: yieldDist.amount.toString() },
       "Processed yield_distributed event",
     );
-    return { netYield: netYield.toString(), operatorFee: operatorFee.toString() };
 
     sseService.broadcastEpochRecorded(contractId, {
       type: "epoch_recorded",
@@ -831,7 +888,7 @@ export class Indexer {
       timestamp: new Date(Number(yieldDist.timestamp) * 1000).toISOString(),
     });
 
-    return parsedData;
+    return { netYield: netYield.toString(), operatorFee: operatorFee.toString() };
   }
 
   private async handleVaultCreated(

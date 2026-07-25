@@ -2,12 +2,14 @@ import { Router } from "express";
 import { z } from "zod";
 import {
   getVaultEpochs,
+  getEpochDetail,
   getUserPendingYield,
   getYieldSummary,
   getYieldPerShareHistory,
+  getYieldTimeline,
 } from "../controllers/yields.js";
 import { getYieldsStream } from "../controllers/yields-stream.js";
-import { validateQuery } from "../middleware/validate.js";
+import { validateQuery, validateParams } from "../middleware/validate.js";
 import { sseLimitPerIp } from "../middleware/sseLimitPerIp.js";
 
 // Yield amounts exceed Number.MAX_SAFE_INTEGER, so BigInt-safe strings are kept
@@ -37,6 +39,11 @@ const epochQuerySchema = z
     }
   });
 
+const epochDetailParamsSchema = z.object({
+  contractId: z.string(),
+  epoch: z.coerce.number().int().positive(),
+});
+
 const yieldHistoryQuerySchema = z.object({
   from: z.string().datetime().optional(),
   to: z.string().datetime().optional(),
@@ -49,5 +56,17 @@ export const yieldsRouter = Router();
 yieldsRouter.get("/stream", sseLimitPerIp(), getYieldsStream);
 yieldsRouter.get("/:contractId/summary", getYieldSummary);
 yieldsRouter.get("/:contractId/epochs", validateQuery(epochQuerySchema), getVaultEpochs);
+yieldsRouter.get(
+  "/:contractId/epochs/:epoch",
+  validateParams(epochDetailParamsSchema),
+  getEpochDetail,
+);
 yieldsRouter.get("/:contractId/yield-per-share-history", validateQuery(yieldHistoryQuerySchema), getYieldPerShareHistory);
 yieldsRouter.get("/:contractId/pending/:userAddress", getUserPendingYield);
+
+const timelineQuerySchema = z.object({
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional(),
+});
+
+yieldsRouter.get("/:contractId/timeline", validateQuery(timelineQuerySchema), getYieldTimeline);

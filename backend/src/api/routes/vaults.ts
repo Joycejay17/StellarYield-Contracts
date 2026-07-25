@@ -33,6 +33,7 @@ import {
   getFeeHistory,
   getVaultFees,
   getCooperatorFees,
+  streamVaultEvents,
 } from "../controllers/vaults.js";
 import { validateParams, validateQuery } from "../middleware/validate.js";
 import { requireApiKey } from "../middleware/auth.js";
@@ -184,6 +185,7 @@ vaultsRouter.get("/trending", getTrendingVaults);
 vaultsRouter.get("/new", validateQuery(newVaultsQuerySchema), getNewVaults);
 vaultsRouter.get("/maturing-soon", validateQuery(maturingSoonQuerySchema), getMaturingSoonVaults);
 vaultsRouter.get("/fully-funded", getFullyFundedVaults);
+vaultsRouter.get("/stream", streamVaultEvents);
 vaultsRouter.get("/factory/:factoryId", validateParams(vaultFactoryParamsSchema), listVaultsByFactory);
 vaultsRouter.get("/:contractId", validateParams(vaultParamsSchema), validateQuery(vaultDetailQuerySchema), getVault);
 vaultsRouter.get("/:contractId/state/live", validateParams(vaultParamsSchema), getVaultLiveState);

@@ -18,23 +18,69 @@ function formatYieldPerShare(yieldAmount: string, totalShares: string): string {
 
 export async function getVaultEpochs(req: Request, res: Response, next: NextFunction) {
   try {
+    const contractId = String(req.params["contractId"]);
     // Yield range filters, already validated by the route schema (#858).
     const { minYield, maxYield } = (req.query ?? {}) as unknown as {
       minYield?: string;
       maxYield?: string;
     };
-    const epochs = await yieldService.getVaultEpochs(String(req.params["contractId"]), {
+    const epochs = await yieldService.getVaultEpochs(contractId, {
       minYield,
       maxYield,
     });
+
+    // Batched per-vault lookups so status/participationRate don't cost an
+    // extra pair of queries per epoch (#816, #817).
+    const [claimStats, holderCounts] = await Promise.all([
+      yieldService.getClaimStatsForVault(contractId),
+      yieldService.getHolderCountsForVault(contractId),
+    ]);
+
     res.json(
-      epochs.map((e) => ({
-        ...e,
-        netYield: e.netYield,
-        yieldPerShare: formatYieldPerShare(e.yieldAmount, e.totalShares),
-        distributedAt: e.distributedAt ? e.distributedAt.toISOString() : null,
-      })),
+      epochs.map((e) => {
+        const stats = claimStats.get(e.epoch) ?? { claimedAmount: "0", uniqueClaimants: 0 };
+        const totalHolders = holderCounts.get(e.epoch) ?? 0;
+        return {
+          ...e,
+          netYield: e.netYield,
+          yieldPerShare: formatYieldPerShare(e.yieldAmount, e.totalShares),
+          distributedAt: e.distributedAt ? e.distributedAt.toISOString() : null,
+          status: yieldService.deriveEpochStatus(e.yieldAmount, stats.claimedAmount),
+          participationRate: yieldService.calculateParticipationRate(
+            stats.uniqueClaimants,
+            totalHolders,
+          ),
+        };
+      }),
     );
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getEpochDetail(req: Request, res: Response, next: NextFunction) {
+  try {
+    const contractId = String(req.params["contractId"]);
+    const epoch = Number(req.params["epoch"]);
+    const detail = await yieldService.getEpochDetail(contractId, epoch);
+    if (!detail) {
+      res.status(404).json({ error: "NotFound", message: "Epoch not found" });
+      return;
+    }
+
+    const [claimStats, totalHolders] = await Promise.all([
+      yieldService.getEpochClaimStats(contractId, epoch),
+      yieldService.getEpochHolderCount(contractId, epoch),
+    ]);
+
+    res.json({
+      ...detail,
+      status: yieldService.deriveEpochStatus(detail.yieldAmount, claimStats.claimedAmount),
+      participationRate: yieldService.calculateParticipationRate(
+        claimStats.uniqueClaimants,
+        totalHolders,
+      ),
+    });
   } catch (err) {
     next(err);
   }
@@ -56,6 +102,37 @@ export async function getYieldSummary(req: Request, res: Response, next: NextFun
   try {
     const summary = await yieldService.getYieldSummary(String(req.params["contractId"]));
     res.json(summary);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getYieldTimeline(req: Request, res: Response, next: NextFunction) {
+  try {
+    const contractId = String(req.params["contractId"]);
+    const fromParam = req.query.from as string | undefined;
+    const toParam = req.query.to as string | undefined;
+
+    let fromDate: Date | undefined;
+    let toDate: Date | undefined;
+
+    if (fromParam) {
+      fromDate = new Date(fromParam);
+      if (isNaN(fromDate.getTime())) {
+        res.status(400).json({ error: "BadRequest", message: "Invalid from date format" });
+        return;
+      }
+    }
+    if (toParam) {
+      toDate = new Date(toParam);
+      if (isNaN(toDate.getTime())) {
+        res.status(400).json({ error: "BadRequest", message: "Invalid to date format" });
+        return;
+      }
+    }
+
+    const result = await yieldService.getYieldTimeline(contractId, fromDate, toDate);
+    res.json(result);
   } catch (err) {
     next(err);
   }
