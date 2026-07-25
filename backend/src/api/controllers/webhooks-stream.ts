@@ -1,7 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { sseService } from "../../services/sse.js";
-import { logger } from "../../logger.js";
 import { query } from "../../db/index.js";
 
 const webhookParamsSchema = z.object({

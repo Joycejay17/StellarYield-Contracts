@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import request from "supertest";
 import { sseManager } from "../../services/sseManager.js";
 import { createApp } from "../../app.js";
-import { query } from "../../db/index.js";
 import { streamVaultEvents } from "./vaults.js";
 import { streamIndexerProgress } from "./admin.js";
 
