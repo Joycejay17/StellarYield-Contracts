@@ -206,7 +206,7 @@ export async function getVault(req: Request, res: Response, next: NextFunction) 
     // Apply sparse fieldset if requested
     let out: Record<string, unknown> | any = vault;
     if (fieldsArray && fieldsArray.length > 0) {
-      out = pickVaultFields(vault as Record<string, unknown>, fieldsArray);
+      out = pickVaultFields(vault, fieldsArray);
     }
 
     // Apply embedding (detail endpoint only)

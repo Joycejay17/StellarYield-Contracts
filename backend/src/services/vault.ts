@@ -211,7 +211,7 @@ export const VAULT_FIELD_ALLOWLIST = Object.keys(VAULT_FIELD_MAP);
  * requested camelCase keys. The `id` field is always retained so that
  * cursor-based pagination and cache keys remain functional.
  */
-export function pickVaultFields(vault: Record<string, unknown>, fields: string[]): Record<string, unknown> {
+export function pickVaultFields(vault: object, fields: string[]): Record<string, unknown> {
   const keep = new Set(fields.includes("id") ? fields : ["id", ...fields]);
   return Object.fromEntries(Object.entries(vault).filter(([k]) => keep.has(k)));
 }
@@ -660,7 +660,7 @@ export class VaultService {
 
     // Sparse fieldsets (#860): pick only requested fields
     if (opts.fields && opts.fields.length > 0) {
-      data = data.map((v) => pickVaultFields(v as Record<string, unknown>, opts.fields!));
+      data = data.map((v) => pickVaultFields(v, opts.fields!));
     }
 
     const result: PaginatedResponse<Vault> = { data: data as Vault[], total, page, pageSize, nextCursor };
