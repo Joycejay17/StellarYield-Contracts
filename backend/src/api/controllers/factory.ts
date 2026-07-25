@@ -13,7 +13,7 @@ export async function getFactoryAdminHistory(_req: Request, res: Response, next:
     }>(
       `SELECT old_admin, new_admin, ledger, recorded_at
        FROM factory_admin_history
-       ORDER BY recorded_at DESC`,
+       ORDER BY recorded_at DESC, id DESC`,
     );
 
     res.json(
@@ -92,7 +92,7 @@ export async function getFactoryEvents(req: Request, res: Response, next: NextFu
       `SELECT event_type, ledger, tx_hash, created_at
        FROM indexed_events
        WHERE contract_id = $1
-       ORDER BY ledger DESC
+       ORDER BY ledger DESC, id DESC
        LIMIT $2 OFFSET $3`,
       [factoryContractId, pageSize, offset],
     );
