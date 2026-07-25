@@ -1,6 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
 import { sseService } from "../../services/sse.js";
-import { config } from "../../config.js";
 
 const SSE_MAX_CONNECTIONS_PER_IP = parseInt(process.env.SSE_MAX_CONNECTIONS_PER_IP ?? "5", 10);
 

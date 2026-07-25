@@ -19,6 +19,7 @@
     "check-indexer": "tsx src/scripts/check-indexer.ts",
     "rotate-api-key": "tsx src/scripts/rotate-api-key.ts",
     "import-from-factory": "tsx src/scripts/import-from-factory.ts",
+    "backfill-cooperator": "tsx src/scripts/backfill-cooperator.ts",
     "indexer": "node dist/indexer/index.js",
     "operator-expiry-task": "node dist/tasks/operatorExpiry.js"
   },

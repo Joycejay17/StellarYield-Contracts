@@ -2,6 +2,7 @@ import { xdr, scValToNative } from "@stellar/stellar-sdk";
 import { config } from "../config.js";
 import { logger } from "../logger.js";
 import { query } from "../db/index.js";
+import { userServiceInstance } from "./userSingleton.js";
 import {
   getSorobanRpc,
   readRwaName,
@@ -841,7 +842,6 @@ export class Indexer {
       { contractId, epoch: yieldDist.epoch, amount: yieldDist.amount.toString() },
       "Processed yield_distributed event",
     );
-    return { netYield: netYield.toString(), operatorFee: operatorFee.toString() };
 
     sseService.broadcastEpochRecorded(contractId, {
       type: "epoch_recorded",
@@ -851,7 +851,7 @@ export class Indexer {
       timestamp: new Date(Number(yieldDist.timestamp) * 1000).toISOString(),
     });
 
-    return parsedData;
+    return { netYield: netYield.toString(), operatorFee: operatorFee.toString() };
   }
 
   private async handleVaultCreated(
