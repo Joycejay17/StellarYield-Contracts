@@ -207,6 +207,55 @@ export class YieldService {
     return parseInt(fallbackRows[0]?.holder_count ?? "0", 10);
   }
 
+  /**
+   * Claim stats for every epoch of a vault in one query, keyed by epoch
+   * number. Used by the epoch list endpoint to avoid N+1 queries (#816, #817).
+   */
+  async getClaimStatsForVault(
+    contractId: string,
+  ): Promise<Map<number, { claimedAmount: string; uniqueClaimants: number }>> {
+    const rows = await query<{ epoch: number; claimed_amount: string; unique_claimants: string }>(
+      `SELECT (payload->>'epoch')::int AS epoch,
+              COALESCE(SUM((payload->>'amount')::numeric), 0)::text AS claimed_amount,
+              COUNT(DISTINCT payload->>'user')::text AS unique_claimants
+       FROM indexed_events
+       WHERE contract_id = $1
+         AND event_type IN ('yield_claimed', 'yield_claimed_partial')
+       GROUP BY (payload->>'epoch')::int`,
+      [contractId],
+    );
+
+    const stats = new Map<number, { claimedAmount: string; uniqueClaimants: number }>();
+    for (const row of rows) {
+      stats.set(row.epoch, {
+        claimedAmount: row.claimed_amount,
+        uniqueClaimants: parseInt(row.unique_claimants, 10),
+      });
+    }
+    return stats;
+  }
+
+  /**
+   * Holder counts for every epoch snapshot of a vault in one query, keyed by
+   * epoch number (#817).
+   */
+  async getHolderCountsForVault(contractId: string): Promise<Map<number, number>> {
+    const rows = await query<{ epoch: number; holder_count: string }>(
+      `SELECT sbs.epoch, COUNT(DISTINCT sbs.user_address)::text AS holder_count
+       FROM share_balance_snapshots sbs
+       JOIN vaults v ON sbs.vault_id = v.id
+       WHERE v.contract_id = $1 AND sbs.shares::numeric > 0
+       GROUP BY sbs.epoch`,
+      [contractId],
+    );
+
+    const counts = new Map<number, number>();
+    for (const row of rows) {
+      counts.set(row.epoch, parseInt(row.holder_count, 10));
+    }
+    return counts;
+  }
+
   /** participationRate = (unique claimants / total holders at snapshot) × 100, 2dp (#817). */
   calculateParticipationRate(uniqueClaimants: number, totalHolders: number): number {
     if (totalHolders <= 0) return 0;
