@@ -17,7 +17,7 @@ vi.mock("../../services/vault.js", () => ({
   },
 }));
 
-import { listVaults, getVault } from "./vaults.js";
+import { getVault } from "./vaults.js";
 
 describe("Sparse fieldsets", () => {
   const mockRes: any = { status: vi.fn().mockReturnThis(), json: vi.fn().mockReturnThis(), set: vi.fn().mockReturnThis() };
