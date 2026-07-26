@@ -4,6 +4,228 @@ import { logger } from "../logger.js";
 import { cacheGet, cacheSet, cacheDel } from "../cache/redis.js";
 import { xdr, scValToNative } from "@stellar/stellar-sdk";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// #859 — Compound Filter Tree
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The vault columns that are safe to expose in a filter expression.
+ * Must exactly match the column names in the vaults table.
+ */
+export const FILTER_ALLOWED_FIELDS = [
+  "state",
+  "rwa_category",
+  "total_assets",
+  "expected_apy",
+  "maturity_date",
+] as const;
+
+export type FilterField = (typeof FILTER_ALLOWED_FIELDS)[number];
+
+export const FILTER_LEAF_OPS = ["eq", "gt", "lt", "gte", "lte", "in"] as const;
+export type FilterLeafOp = (typeof FILTER_LEAF_OPS)[number];
+
+export const FILTER_NODE_OPS = ["AND", "OR"] as const;
+export type FilterNodeOp = (typeof FILTER_NODE_OPS)[number];
+
+export interface FilterLeaf {
+  field: FilterField;
+  op: FilterLeafOp;
+  value: string | number | string[] | number[];
+}
+
+export interface FilterNode {
+  op: FilterNodeOp;
+  filters: Array<FilterNode | FilterLeaf>;
+}
+
+export type FilterTree = FilterNode | FilterLeaf;
+
+/** Maximum allowed nesting depth for a filter tree. */
+export const MAX_FILTER_DEPTH = 3;
+
+function isFilterLeaf(node: FilterTree): node is FilterLeaf {
+  return "field" in node;
+}
+
+/**
+ * Recursively measure the depth of a filter tree.
+ * A leaf has depth 1; a node has depth 1 + max(children depths).
+ */
+export function filterTreeDepth(node: FilterTree): number {
+  if (isFilterLeaf(node)) return 1;
+  if (node.filters.length === 0) return 1;
+  return 1 + Math.max(...node.filters.map(filterTreeDepth));
+}
+
+/**
+ * Validate a filter tree structure. Returns a non-empty error string on
+ * failure, or undefined when the tree is valid.
+ */
+export function validateFilterTree(node: FilterTree, depth = 0): string | undefined {
+  if (depth >= MAX_FILTER_DEPTH) {
+    return `Filter tree depth exceeds maximum of ${MAX_FILTER_DEPTH}`;
+  }
+  if (isFilterLeaf(node)) {
+    if (!(FILTER_ALLOWED_FIELDS as readonly string[]).includes(node.field)) {
+      return `Unknown filter field "${node.field}". Allowed: ${FILTER_ALLOWED_FIELDS.join(", ")}`;
+    }
+    if (!(FILTER_LEAF_OPS as readonly string[]).includes(node.op)) {
+      return `Unknown filter operator "${node.op}". Allowed: ${FILTER_LEAF_OPS.join(", ")}`;
+    }
+    if (node.op === "in" && !Array.isArray(node.value)) {
+      return `Filter operator "in" requires an array value`;
+    }
+    return undefined;
+  }
+  // FilterNode
+  if (!(FILTER_NODE_OPS as readonly string[]).includes(node.op)) {
+    return `Unknown logical operator "${node.op}". Allowed: ${FILTER_NODE_OPS.join(", ")}`;
+  }
+  if (!Array.isArray(node.filters) || node.filters.length === 0) {
+    return `Filter node with op "${node.op}" must have a non-empty filters array`;
+  }
+  for (const child of node.filters) {
+    const err = validateFilterTree(child, depth + 1);
+    if (err) return err;
+  }
+  return undefined;
+}
+
+/**
+ * Translate a filter tree into a SQL fragment using $N positional parameters.
+ *
+ * The function mutates `params` (appends bound values) and returns the SQL
+ * snippet. It uses raw `pg` positional parameters, matching the rest of the
+ * codebase — no ORM, no Knex.
+ *
+ * @param node       - The filter tree to translate.
+ * @param params     - Accumulator array; items will be pushed onto it.
+ * @param startIdx   - The $N index to start from (1-based).
+ * @returns `{ sql, nextIdx }` — the SQL fragment and the next free index.
+ */
+export function applyFilterTree(
+  node: FilterTree,
+  params: unknown[],
+  startIdx: number,
+): { sql: string; nextIdx: number } {
+  if (isFilterLeaf(node)) {
+    const col = `v.${node.field}`;
+    let idx = startIdx;
+    let sql: string;
+
+    switch (node.op) {
+      case "eq":
+        params.push(node.value);
+        sql = `${col} = $${idx}`;
+        idx++;
+        break;
+      case "gt":
+        params.push(node.value);
+        sql = `${col} > $${idx}`;
+        idx++;
+        break;
+      case "lt":
+        params.push(node.value);
+        sql = `${col} < $${idx}`;
+        idx++;
+        break;
+      case "gte":
+        params.push(node.value);
+        sql = `${col} >= $${idx}`;
+        idx++;
+        break;
+      case "lte":
+        params.push(node.value);
+        sql = `${col} <= $${idx}`;
+        idx++;
+        break;
+      case "in": {
+        const values = node.value as (string | number)[];
+        const placeholders = values.map((_, i) => `$${idx + i}`).join(", ");
+        values.forEach((v) => params.push(v));
+        sql = `${col} = ANY(ARRAY[${placeholders}])`;
+        idx += values.length;
+        break;
+      }
+      default:
+        throw new Error(`Unhandled leaf op: ${(node as FilterLeaf).op}`);
+    }
+
+    return { sql, nextIdx: idx };
+  }
+
+  // FilterNode — AND / OR
+  const parts: string[] = [];
+  let idx = startIdx;
+  for (const child of node.filters) {
+    const result = applyFilterTree(child, params, idx);
+    parts.push(result.sql);
+    idx = result.nextIdx;
+  }
+  const joined = parts.join(` ${node.op} `);
+  return { sql: `(${joined})`, nextIdx: idx };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #860 — Sparse Fieldsets — camelCase→snake_column map
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Every camelCase field name that callers may request via `?fields=`.
+ * Maps to the SQL column/expression used in SELECT.
+ */
+export const VAULT_FIELD_MAP: Record<string, string> = {
+  id: "v.id",
+  contractId: "v.contract_id",
+  factoryId: "v.factory_id",
+  asset: "v.asset",
+  name: "v.name",
+  symbol: "v.symbol",
+  state: "v.state",
+  totalAssets: "v.total_assets",
+  totalSupply: "v.total_supply",
+  totalSharesEverMinted: "v.total_shares_ever_minted",
+  totalSharesEverBurned: "v.total_shares_ever_burned",
+  depositorCount: `COALESCE((SELECT COUNT(*)::int FROM user_vault_positions uvp WHERE uvp.vault_id = v.id AND uvp.shares > 0), 0)`,
+  fundingTarget: "v.funding_target",
+  fundingDeadline: "v.funding_deadline",
+  fundingProgress: "v.total_assets, v.funding_target", // computed post-query
+  minDeposit: "v.min_deposit",
+  maxDepositPerUser: "v.max_deposit_per_user",
+  zkmeVerifier: "v.zkme_verifier_address",
+  rwaName: "v.rwa_name",
+  rwaSymbol: "v.rwa_symbol",
+  rwaDocumentUri: "v.rwa_document_uri",
+  rwaCategory: "v.rwa_category",
+  createdAt: "v.created_at",
+  updatedAt: "v.updated_at",
+  expectedApy: "v.expected_apy",
+  maturityDate: "v.maturity_date",
+};
+
+export const VAULT_FIELD_ALLOWLIST = Object.keys(VAULT_FIELD_MAP);
+
+/**
+ * Apply a sparse fieldset to a vault response object, keeping only the
+ * requested camelCase keys. The `id` field is always retained so that
+ * cursor-based pagination and cache keys remain functional.
+ */
+export function pickVaultFields(vault: object, fields: string[]): Record<string, unknown> {
+  const keep = new Set(fields.includes("id") ? fields : ["id", ...fields]);
+  return Object.fromEntries(Object.entries(vault).filter(([k]) => keep.has(k)));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #862 — Aggregation result type
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface VaultAggregates {
+  totalAssets: { min: string; max: string; avg: string; sum: string };
+  expectedApy: { min: number; max: number; avg: number };
+  depositorCount: { min: number; max: number; avg: number };
+}
+
 const TTL_BY_STATE: Record<string, number> = {
   Active: 10,
   Funding: 30,
@@ -127,6 +349,10 @@ interface ListVaultsOptions {
   /** Inclusive upper bound on `total_assets`, as a non-negative integer string (#857). */
   maxTotalAssets?: string;
   q?: string; // forwarded from controller; listVaults currently delegates text search to /search
+  /** Compound filter tree (#859). Already validated by the route layer. */
+  filter?: FilterTree;
+  /** Sparse fieldset — camelCase field names to include (#860). */
+  fields?: string[];
 }
 
 /** Row-selection filters shared by the vault list query and its COUNT companion. */
@@ -320,11 +546,18 @@ export class VaultService {
     };
     const filtered = buildVaultListFilters(filters);
     const conditions = filtered.conditions;
-    const params = filtered.params;
+    const params: unknown[] = filtered.params;
     let paramIdx = filtered.nextIdx;
 
     // Filter out archived vaults from standard list queries (#674)
     conditions.push(`v.archived = FALSE`);
+
+    // Compound filter tree (#859)
+    if (opts.filter) {
+      const { sql: filterSql, nextIdx } = applyFilterTree(opts.filter, params, paramIdx + 1);
+      conditions.push(filterSql);
+      paramIdx = nextIdx - 1;
+    }
 
     if (cursorId !== null && cursorCreatedAt !== null) {
       paramIdx++;
@@ -384,7 +617,7 @@ export class VaultService {
         LIMIT $${limitIdx} OFFSET $${limitIdx + 1}`;
     }
 
-    const vaults = await query<VaultRow>(sql, params);
+    const vaults = await query<VaultRow>(sql, params as any[]);
 
     // Determine nextCursor if cursor-based pagination
     let nextCursor: string | null = null;
@@ -401,20 +634,36 @@ export class VaultService {
     // Get total count (only when not using cursor, to avoid expensive counts)
     let total = 0;
     if (!cursor) {
-      const { conditions: countConditions, params: countParams } =
-        buildVaultListFilters(filters);
+      const countFilters = buildVaultListFilters(filters);
+      const countConditions = countFilters.conditions;
+      const countParams: unknown[] = countFilters.params;
+      let countIdx = countFilters.nextIdx;
+
+      countConditions.push(`v.archived = FALSE`);
+
+      if (opts.filter) {
+        const { sql: filterSql, nextIdx } = applyFilterTree(opts.filter, countParams, countIdx + 1);
+        countConditions.push(filterSql);
+        countIdx = nextIdx - 1;
+      }
+
       const countWhere = countConditions.length > 0 ? `WHERE ${countConditions.join(" AND ")}` : "";
       const countResult = await query<{ count: string }>(
         `SELECT COUNT(*) as count FROM vaults v ${countWhere}`,
-        countParams,
+        countParams as any[],
       );
       total = parseInt(countResult[0]?.count ?? "0", 10);
     }
 
     // Map database rows to Vault type
-    const data: Vault[] = vaults.map(mapVaultRow);
+    let data: (Vault | Record<string, unknown>)[] = vaults.map(mapVaultRow);
 
-    const result: PaginatedResponse<Vault> = { data, total, page, pageSize, nextCursor };
+    // Sparse fieldsets (#860): pick only requested fields
+    if (opts.fields && opts.fields.length > 0) {
+      data = data.map((v) => pickVaultFields(v, opts.fields!));
+    }
+
+    const result: PaginatedResponse<Vault> = { data: data as Vault[], total, page, pageSize, nextCursor };
     const listTtl = TTL_BY_STATE[state ?? ""] ?? DEFAULT_TTL;
     await cacheSet(cacheKey, result, listTtl);
     return result;
@@ -1275,6 +1524,125 @@ export class VaultService {
       totalAssets: r.total_assets ?? "0",
       rwaCategory: r.rwa_category,
     }));
+  }
+
+  // ── Issue #861: Fetch epochs for a vault (used by embed) ──────────────────
+  async getVaultEpochs(contractId: string): Promise<{
+    id: number;
+    epoch: number;
+    yieldAmount: string;
+    totalShares: string;
+    distributedAt: Date | null;
+  }[]> {
+    const rows = await query<{
+      id: number;
+      epoch: number;
+      yield_amount: string;
+      total_shares: string;
+      distributed_at: Date | null;
+    }>(
+      `SELECT e.id, e.epoch, e.yield_amount, e.total_shares, e.distributed_at
+       FROM epochs e
+       JOIN vaults v ON e.vault_id = v.id
+       WHERE v.contract_id = $1
+       ORDER BY e.epoch ASC`,
+      [contractId],
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      epoch: r.epoch,
+      yieldAmount: r.yield_amount,
+      totalShares: r.total_shares,
+      distributedAt: r.distributed_at,
+    }));
+  }
+
+  // ── Issue #862: Vault Aggregation ─────────────────────────────────────────
+  /**
+   * Return MIN/MAX/AVG/SUM aggregates across vaults.
+   *
+   * - `totalAssets` values are serialised as BigInt-safe strings.
+   * - `expectedApy` and `depositorCount` are numbers (safe precision range).
+   * - When no vaults match, all numeric fields are zero / "0".
+   * - Optional `state` filter scopes all aggregates to that vault state.
+   */
+  async getVaultAggregates(state?: string): Promise<VaultAggregates> {
+    const conditions: string[] = ["v.archived = FALSE"];
+    const params: unknown[] = [];
+
+    if (state) {
+      params.push(state);
+      conditions.push(`v.state = $${params.length}`);
+    }
+
+    const whereClause = `WHERE ${conditions.join(" AND ")}`;
+
+    const rows = await query<{
+      min_total_assets: string | null;
+      max_total_assets: string | null;
+      avg_total_assets: string | null;
+      sum_total_assets: string | null;
+      min_expected_apy: number | null;
+      max_expected_apy: number | null;
+      avg_expected_apy: string | null;
+      min_depositor_count: number | null;
+      max_depositor_count: number | null;
+      avg_depositor_count: string | null;
+    }>(
+      `SELECT
+         MIN(v.total_assets)::text  AS min_total_assets,
+         MAX(v.total_assets)::text  AS max_total_assets,
+         AVG(v.total_assets)::text  AS avg_total_assets,
+         SUM(v.total_assets)::text  AS sum_total_assets,
+         MIN(v.expected_apy)        AS min_expected_apy,
+         MAX(v.expected_apy)        AS max_expected_apy,
+         AVG(v.expected_apy)::text  AS avg_expected_apy,
+         MIN(COALESCE((
+           SELECT COUNT(*)::int FROM user_vault_positions uvp
+           WHERE uvp.vault_id = v.id AND uvp.shares > 0
+         ), 0))                     AS min_depositor_count,
+         MAX(COALESCE((
+           SELECT COUNT(*)::int FROM user_vault_positions uvp
+           WHERE uvp.vault_id = v.id AND uvp.shares > 0
+         ), 0))                     AS max_depositor_count,
+         AVG(COALESCE((
+           SELECT COUNT(*)::int FROM user_vault_positions uvp
+           WHERE uvp.vault_id = v.id AND uvp.shares > 0
+         ), 0))::text               AS avg_depositor_count
+       FROM vaults v
+       ${whereClause}`,
+      params,
+    );
+
+    const r = rows[0];
+
+    // Serialise totalAssets as BigInt-safe strings; fall back to "0".
+    const toStr = (v: string | null) => {
+      if (v === null || v === "") return "0";
+      // AVG/SUM may return a decimal string from postgres; round for BigInt safety
+      const n = parseFloat(v);
+      if (isNaN(n)) return "0";
+      return Math.round(n).toString();
+    };
+
+    return {
+      totalAssets: {
+        min: toStr(r?.min_total_assets),
+        max: toStr(r?.max_total_assets),
+        avg: toStr(r?.avg_total_assets),
+        sum: toStr(r?.sum_total_assets),
+      },
+      expectedApy: {
+        min: r?.min_expected_apy ?? 0,
+        max: r?.max_expected_apy ?? 0,
+        avg: Math.round(parseFloat(r?.avg_expected_apy ?? "0") * 100) / 100,
+      },
+      depositorCount: {
+        min: r?.min_depositor_count ?? 0,
+        max: r?.max_depositor_count ?? 0,
+        avg: Math.round(parseFloat(r?.avg_depositor_count ?? "0") * 100) / 100,
+      },
+    };
   }
 
   async getCompoundProjection(

@@ -6,6 +6,7 @@ import {
   getUserPendingYield,
   getYieldSummary,
   getYieldPerShareHistory,
+  getYieldTimeline,
 } from "../controllers/yields.js";
 import { getYieldsStream } from "../controllers/yields-stream.js";
 import { validateQuery, validateParams } from "../middleware/validate.js";
@@ -62,3 +63,10 @@ yieldsRouter.get(
 );
 yieldsRouter.get("/:contractId/yield-per-share-history", validateQuery(yieldHistoryQuerySchema), getYieldPerShareHistory);
 yieldsRouter.get("/:contractId/pending/:userAddress", getUserPendingYield);
+
+const timelineQuerySchema = z.object({
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional(),
+});
+
+yieldsRouter.get("/:contractId/timeline", validateQuery(timelineQuerySchema), getYieldTimeline);

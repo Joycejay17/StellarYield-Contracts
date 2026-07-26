@@ -2,7 +2,6 @@ import cors from "cors";
 import express, { type Express } from "express";
 import helmet from "helmet";
 import { pinoHttp } from "pino-http";
-import { createHandler } from "graphql-http/lib/use/express";
 import { printSchema } from "graphql";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
@@ -14,6 +13,7 @@ import { adminRouter } from "./api/routes/admin.js";
 import { factoryRouter } from "./api/routes/factory.js";
 import { webhooksRouter } from "./api/routes/webhooks.js";
 import { analyticsRouter } from "./api/routes/analytics.js";
+import { factoryRouter } from "./api/routes/factory.js";
 import { errorHandler } from "./api/middleware/errors.js";
 import { requestId } from "./api/middleware/requestId.js";
 import { internalAuth } from "./api/middleware/internalAuth.js";
@@ -22,8 +22,7 @@ import { publicLimiter, authLimiter } from "./api/middleware/rateLimit.js";
 import { httpRequestsTotal, getMetrics } from "./services/metrics.js";
 import { setupOpenApiRoutes } from "./services/openapi.js";
 import { schema } from "./graphql/schema.js";
-import { root } from "./graphql/resolvers.js";
-import { createGraphQLContext } from "./graphql/context.js";
+import { apolloMiddleware } from "./graphql/apolloServer.js";
 
 export function createApp(): Express {
   const app = express();
@@ -56,17 +55,15 @@ export function createApp(): Express {
   app.use("/api/v1/users", publicLimiter, usersRouter);
   app.use("/api/v1/yields", publicLimiter, yieldsRouter);
   app.use("/api/v1/analytics", publicLimiter, analyticsRouter);
+  app.use("/api/v1/factory", publicLimiter, factoryRouter);
   app.use("/api/v1/admin", authLimiter, adminRouter);
   app.use("/api/v1/factory", publicLimiter, factoryRouter);
   app.use("/api/v1/webhooks", authLimiter, webhooksRouter);
   app.use("/internal", authLimiter, internalAuth, internalRouter);
-  app.all(
-    "/graphql",
-    publicLimiter,
-    createHandler({ schema, rootValue: root, context: createGraphQLContext }),
-  );
   // SDL export for client codegen tools (e.g. graphql-codegen); cached since the
-  // schema only changes on server restart (#773).
+  // schema only changes on server restart (#773). Registered before the Apollo
+  // mount below so this exact sub-path is matched first (Express matches
+  // `app.use("/api/graphql", ...)` as a prefix, which would otherwise shadow it).
   let cachedSchemaSdl: string | null = null;
   app.get("/api/graphql/schema", publicLimiter, (_req, res) => {
     if (cachedSchemaSdl === null) {
@@ -75,6 +72,9 @@ export function createApp(): Express {
     res.set("Content-Type", "application/graphql");
     res.send(cachedSchemaSdl);
   });
+  // GraphQL endpoint served via Apollo Server (#765). The Playground/Sandbox
+  // landing page is only enabled in development (see graphql/apolloServer.ts).
+  app.use("/api/graphql", publicLimiter, apolloMiddleware);
   app.get("/metrics", async (_req, res) => {
     res.set("Content-Type", "text/plain");
     res.send(await getMetrics());

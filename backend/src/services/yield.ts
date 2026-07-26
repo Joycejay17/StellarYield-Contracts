@@ -455,4 +455,56 @@ export class YieldService {
 
     return { data, total };
   }
+
+  // ── Epoch yield distribution timeline (#822) ────────────────────────────────
+  // Returns all epochs for a vault ordered by epoch number, optionally bounded
+  // by ISO date filters on distributed_at. `totalInRange` is the exact sum of
+  // all yieldAmount values in the result set.
+  async getYieldTimeline(
+    contractId: string,
+    from?: Date,
+    to?: Date,
+  ): Promise<{
+    points: Array<{ epoch: number; yieldAmount: string; distributedAt: string | null }>;
+    totalInRange: string;
+  }> {
+    const conditions: string[] = ["v.contract_id = $1"];
+    const params: unknown[] = [contractId];
+
+    if (from) {
+      params.push(from);
+      conditions.push(`e.distributed_at >= $${params.length}`);
+    }
+    if (to) {
+      params.push(to);
+      conditions.push(`e.distributed_at <= $${params.length}`);
+    }
+
+    const where = conditions.join(" AND ");
+
+    const rows = await query<{
+      epoch: number;
+      yield_amount: string;
+      distributed_at: Date | null;
+    }>(
+      `SELECT e.epoch, e.yield_amount, e.distributed_at
+       FROM epochs e
+       JOIN vaults v ON e.vault_id = v.id
+       WHERE ${where}
+       ORDER BY e.epoch ASC`,
+      params,
+    );
+
+    const points = rows.map((row) => ({
+      epoch: row.epoch,
+      yieldAmount: row.yield_amount,
+      distributedAt: row.distributed_at ? row.distributed_at.toISOString() : null,
+    }));
+
+    const totalInRange = points
+      .reduce((sum, p) => sum + BigInt(p.yieldAmount), 0n)
+      .toString();
+
+    return { points, totalInRange };
+  }
 }
