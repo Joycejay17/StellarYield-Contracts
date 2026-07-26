@@ -28,6 +28,10 @@ export class YieldService {
     return `${integer}.${fraction}`;
   }
 
+  /**
+   * Fetch all epochs for a vault, with optional yield-amount range filters.
+   * Results are cached for {@link EPOCHS_CACHE_TTL} seconds.
+   */
   async getVaultEpochs(contractId: string, filters: EpochFilterOptions = {}): Promise<Epoch[]> {
     const { minYield, maxYield } = filters;
 
@@ -264,6 +268,13 @@ export class YieldService {
     return Math.round(rate * 100) / 100;
   }
 
+  /**
+   * Compute the user's unclaimed yield across all epochs for a vault.
+   *
+   * @remarks BigInt arithmetic is used throughout to avoid precision loss:
+   * for each unclaimed epoch, `pendingYield += (yieldAmount * userShares) / totalShares`.
+   * Results are cached for {@link PENDING_YIELD_CACHE_TTL} seconds.
+   */
   async getUserPendingYield(
     contractId: string,
     userAddress: string,
@@ -334,6 +345,10 @@ export class YieldService {
     return result;
   }
 
+  /**
+   * Aggregate yield metrics for a vault: total epochs, total yield distributed,
+   * average yield per epoch, and estimated APY.
+   */
   async getYieldSummary(contractId: string): Promise<{
     totalEpochs: string;
     totalYieldDistributed: string;
@@ -386,6 +401,10 @@ export class YieldService {
     };
   }
 
+  /**
+   * Persist a yield distribution epoch. Idempotent on (vault_id, epoch)
+   * conflict. Invalidates the epoch cache.
+   */
   async recordEpoch(
     vaultId: number,
     epoch: number,
@@ -490,5 +509,57 @@ export class YieldService {
     }));
 
     return { data, total };
+  }
+
+  // ── Epoch yield distribution timeline (#822) ────────────────────────────────
+  // Returns all epochs for a vault ordered by epoch number, optionally bounded
+  // by ISO date filters on distributed_at. `totalInRange` is the exact sum of
+  // all yieldAmount values in the result set.
+  async getYieldTimeline(
+    contractId: string,
+    from?: Date,
+    to?: Date,
+  ): Promise<{
+    points: Array<{ epoch: number; yieldAmount: string; distributedAt: string | null }>;
+    totalInRange: string;
+  }> {
+    const conditions: string[] = ["v.contract_id = $1"];
+    const params: unknown[] = [contractId];
+
+    if (from) {
+      params.push(from);
+      conditions.push(`e.distributed_at >= $${params.length}`);
+    }
+    if (to) {
+      params.push(to);
+      conditions.push(`e.distributed_at <= $${params.length}`);
+    }
+
+    const where = conditions.join(" AND ");
+
+    const rows = await query<{
+      epoch: number;
+      yield_amount: string;
+      distributed_at: Date | null;
+    }>(
+      `SELECT e.epoch, e.yield_amount, e.distributed_at
+       FROM epochs e
+       JOIN vaults v ON e.vault_id = v.id
+       WHERE ${where}
+       ORDER BY e.epoch ASC`,
+      params,
+    );
+
+    const points = rows.map((row) => ({
+      epoch: row.epoch,
+      yieldAmount: row.yield_amount,
+      distributedAt: row.distributed_at ? row.distributed_at.toISOString() : null,
+    }));
+
+    const totalInRange = points
+      .reduce((sum, p) => sum + BigInt(p.yieldAmount), 0n)
+      .toString();
+
+    return { points, totalInRange };
   }
 }

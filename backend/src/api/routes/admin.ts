@@ -22,11 +22,17 @@ import {
   getFlaggedUsers,
   getPositionsSnapshot,
   streamIndexerProgress,
+  getVaultComplianceStatus,
+  getUserComplianceSummary,
+  getRetentionPolicy,
+  patchRetentionPolicy,
 } from "../controllers/admin.js";
 import { requireApiKey } from "../middleware/auth.js";
+import { ipAllowlist } from "../middleware/ipAllowlist.js";
 
 export const adminRouter = Router();
 
+adminRouter.use(ipAllowlist());
 adminRouter.use(requireApiKey({ minRole: "readonly" }));
 
 adminRouter.get("/stats", getAdminStats);
@@ -50,6 +56,15 @@ adminRouter.post("/users/:address/aml-flag", flagUserAml);
 adminRouter.post("/users/:address/aml-clear", clearUserAml);
 adminRouter.get("/compliance/flagged-users", getFlaggedUsers);
 adminRouter.get("/compliance/positions-snapshot", getPositionsSnapshot);
+
+// Issue #803: Vault compliance status
+adminRouter.get("/compliance/vaults/:contractId/status", getVaultComplianceStatus);
+// Issue #802: User compliance summary
+adminRouter.get("/compliance/users/:address/summary", getUserComplianceSummary);
+
+// Issue #804: Data retention policy
+adminRouter.get("/retention-policy", getRetentionPolicy);
+adminRouter.patch("/retention-policy", patchRetentionPolicy);
 
 adminRouter.get("/jobs/failed", getFailedJobs);
 adminRouter.get("/jobs/:jobId", getJobStatus);

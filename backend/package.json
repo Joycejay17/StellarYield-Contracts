@@ -20,6 +20,7 @@
     "rotate-api-key": "tsx src/scripts/rotate-api-key.ts",
     "import-from-factory": "tsx src/scripts/import-from-factory.ts",
     "backfill-cooperator": "tsx src/scripts/backfill-cooperator.ts",
+    "resync-vault": "tsx src/scripts/resync-vault.ts",
     "indexer": "node dist/indexer/index.js",
     "operator-expiry-task": "node dist/tasks/operatorExpiry.js"
   },
@@ -27,6 +28,8 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@apollo/server": "^5.5.1",
+    "@as-integrations/express4": "^1.1.2",
     "@asteasolutions/zod-to-openapi": "^7.3.4",
     "@stellar/stellar-sdk": "^14.0.0",
     "@stellaryield/sdk": "file:../sdk",
@@ -37,7 +40,6 @@
     "express-rate-limit": "^8.5.2",
     "express-validator": "^7.0.1",
     "graphql": "^16.14.2",
-    "graphql-http": "^1.22.4",
     "helmet": "8.0.0",
     "ioredis": "^5.4.2",
     "node-cron": "^3.0.3",

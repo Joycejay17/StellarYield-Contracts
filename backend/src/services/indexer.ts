@@ -15,6 +15,39 @@ import { NotificationService } from "./notifications.js";
 import { indexerEventsProcessedTotal, indexerLastLedger } from "./metrics.js";
 import { cacheDel } from "../cache/redis.js";
 import { sseService } from "./sse.js";
+import { recordRpcSuccess, recordRpcError } from "./rpcMonitor.js";
+
+// ── Lightweight trace spans (#827) ────────────────────────────────────────────
+// No external tracing dependency — spans are emitted as structured pino log
+// entries with traceId/spanId/parentSpanId so they can be correlated in any
+// log aggregator (Loki, CloudWatch, Datadog, etc.).
+
+let _spanSeq = 0;
+function nextSpanId(): string {
+  return (++_spanSeq).toString(16).padStart(8, "0");
+}
+
+interface Span {
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+  name: string;
+  startMs: number;
+  attrs: Record<string, unknown>;
+}
+
+function startSpan(name: string, attrs: Record<string, unknown> = {}, parent?: Span): Span {
+  const traceId = parent?.traceId ?? nextSpanId() + nextSpanId();
+  return { traceId, spanId: nextSpanId(), parentSpanId: parent?.spanId, name, startMs: Date.now(), attrs };
+}
+
+function finishSpan(span: Span, extra: Record<string, unknown> = {}): void {
+  const durationMs = Date.now() - span.startMs;
+  logger.debug(
+    { traceId: span.traceId, spanId: span.spanId, parentSpanId: span.parentSpanId, durationMs, ...span.attrs, ...extra },
+    span.name,
+  );
+}
 
 // ── Upstream helpers ───────────────────────────────────────────────────────────
 
@@ -59,8 +92,11 @@ async function withBackoff<T>(
   let attempt = 0;
   while (true) {
     try {
-      return await fn();
+      const result = await fn();
+      recordRpcSuccess();
+      return result;
     } catch (err: any) {
+      recordRpcError();
       const is429 =
         err?.response?.status === 429 ||
         err?.status === 429 ||
@@ -225,6 +261,7 @@ export class Indexer {
   }
 
   async tick(): Promise<void> {
+    const tickSpan = startSpan("indexer.tick");
     const server = getSorobanRpc();
 
     let latestLedger: number;
@@ -233,6 +270,7 @@ export class Indexer {
       latestLedger = resp.sequence;
     } catch (err) {
       logger.warn({ err }, "RPC error fetching latest ledger during tick");
+      finishSpan(tickSpan, { error: true });
       return;
     }
 
@@ -243,9 +281,14 @@ export class Indexer {
       logger.error(`Indexer lag: ${lag} ledgers behind chain tip`);
     }
 
-    if (latestLedger <= this.lastLedger) return;
+    if (latestLedger <= this.lastLedger) {
+      finishSpan(tickSpan, { ledgerRange: 0, eventCount: 0 });
+      return;
+    }
 
     const from = this.lastLedger + 1;
+    tickSpan.attrs["ledgerRange"] = `${from}-${latestLedger}`;
+
     const contractIds = Array.from(this.watchedContractIds);
     const filters = contractIds.length > 0
       ? contractIds.map((id) => ({ contractIds: [id] }))
@@ -259,8 +302,11 @@ export class Indexer {
       events = resp.events;
     } catch (err) {
       logger.warn({ err, from, to: latestLedger }, "RPC error fetching events during tick");
+      finishSpan(tickSpan, { error: true });
       return;
     }
+
+    tickSpan.attrs["eventCount"] = events.length;
 
     logger.info(
       { from, to: latestLedger, eventCount: events.length },
@@ -268,11 +314,7 @@ export class Indexer {
     );
 
     for (const event of events) {
-      logger.debug(
-        { contractId: event.contractId, type: event.type, ledger: event.ledger },
-        "Processing event",
-      );
-      await this.processEvent(event);
+      await this.processEvent(event, tickSpan);
     }
 
     await this.notificationService?.processRetries();
@@ -280,6 +322,7 @@ export class Indexer {
     this.lastLedger = latestLedger;
     await this.persistLastLedger();
     this.lastTickAt = new Date();
+    finishSpan(tickSpan);
   }
 
   private async backfill(tipLedger: number): Promise<void> {
@@ -325,7 +368,21 @@ export class Indexer {
     }
   }
 
-  async processEvent(event: any): Promise<void> {
+  async processEvent(event: any, parentSpan?: Span): Promise<void> {
+    const eventSpan = startSpan(
+      "indexer.process_event",
+      { eventType: event.type ?? "unknown", contractId: event.contractId ?? "" },
+      parentSpan,
+    );
+
+    try {
+      await this._processEventInner(event);
+    } finally {
+      finishSpan(eventSpan);
+    }
+  }
+
+  private async _processEventInner(event: any): Promise<void> {
     const existing = await query(
       "SELECT id FROM indexed_events WHERE tx_hash = $1 AND contract_id = $2 AND event_type = $3 AND ledger = $4",
       [event.id ?? event.txHash ?? "", event.contractId ?? "", event.type ?? "", event.ledger ?? 0],
@@ -606,6 +663,26 @@ export class Indexer {
     if (zkmeUpd) {
       await this.handleZkmeVerifierUpdated(event.contractId ?? "", zkmeUpd);
       await this.recordEvent(event, "zkme_upd");
+      return;
+    }
+
+    const adminTransferred = parseAdminTransferredEvent(event);
+    if (adminTransferred) {
+      await this.handleAdminTransferred(event.ledger ?? 0, adminTransferred);
+      await this.recordEvent(event, "adm_xfr", {
+        oldAdmin: adminTransferred.oldAdmin,
+        newAdmin: adminTransferred.newAdmin,
+      });
+      return;
+    }
+
+    const defaultsUpdated = parseDefaultsUpdatedEvent(event);
+    if (defaultsUpdated) {
+      await this.recordEvent(event, "def_upd", {
+        asset: defaultsUpdated.asset,
+        zkmeVerifier: defaultsUpdated.zkmeVerifier,
+        cooperator: defaultsUpdated.cooperator,
+      });
       return;
     }
 
@@ -1212,6 +1289,18 @@ export class Indexer {
       [ev.newVerifier, contractId],
     );
     logger.info({ contractId, verifier: ev.newVerifier }, "Processed zkme_upd event");
+  }
+
+  private async handleAdminTransferred(
+    ledger: number,
+    ev: { oldAdmin: string; newAdmin: string },
+  ): Promise<void> {
+    await query(
+      `INSERT INTO factory_admin_history (old_admin, new_admin, ledger, recorded_at)
+       VALUES ($1, $2, $3, NOW())`,
+      [ev.oldAdmin, ev.newAdmin, ledger],
+    );
+    logger.info({ oldAdmin: ev.oldAdmin, newAdmin: ev.newAdmin, ledger }, "Processed adm_xfr event");
   }
 
   private async handleKycSet(
@@ -2077,6 +2166,92 @@ export function parseZkmeVerifierUpdatedEvent(rawEvent: unknown): ParsedZkmeVeri
     const newVerifier = String(arr[1] ?? "");
 
     return { caller, oldVerifier, newVerifier };
+  } catch {
+    return null;
+  }
+}
+
+// ── Issue #839: parseAdminTransferredEvent ────────────────────────────────────
+
+export interface ParsedAdminTransferredEvent {
+  oldAdmin: string;
+  newAdmin: string;
+}
+
+export function parseAdminTransferredEvent(rawEvent: unknown): ParsedAdminTransferredEvent | null {
+  try {
+    if (!rawEvent || typeof rawEvent !== "object") return null;
+    const ev = rawEvent as Record<string, unknown>;
+    const topics = (ev["topic"] ?? ev["topics"]) as unknown[] | undefined;
+    const value = ev["value"] ?? ev["data"];
+
+    if (!Array.isArray(topics) || topics.length < 1 || value == null) return null;
+
+    const parsedTopics = topics.map((t) =>
+      typeof t === "string" ? xdr.ScVal.fromXDR(t, "base64") : (t as xdr.ScVal),
+    );
+    const parsedValue = typeof value === "string"
+      ? xdr.ScVal.fromXDR(value, "base64")
+      : value;
+
+    let eventName: string;
+    try {
+      eventName = String(scValToNative(parsedTopics[0]) ?? "");
+    } catch {
+      return null;
+    }
+    if (eventName !== "adm_xfr" && eventName !== "admin_transferred") return null;
+
+    const data = scValToNative(parsedValue as xdr.ScVal);
+    const arr = Array.isArray(data) ? data : Object.values((data as Record<string, unknown>) ?? {});
+    const oldAdmin = String(arr[0] ?? "");
+    const newAdmin = String(arr[1] ?? "");
+
+    return { oldAdmin, newAdmin };
+  } catch {
+    return null;
+  }
+}
+
+// ── Issue #841: parseDefaultsUpdatedEvent ─────────────────────────────────────
+
+export interface ParsedDefaultsUpdatedEvent {
+  asset: string;
+  zkmeVerifier: string;
+  cooperator: string;
+}
+
+export function parseDefaultsUpdatedEvent(rawEvent: unknown): ParsedDefaultsUpdatedEvent | null {
+  try {
+    if (!rawEvent || typeof rawEvent !== "object") return null;
+    const ev = rawEvent as Record<string, unknown>;
+    const topics = (ev["topic"] ?? ev["topics"]) as unknown[] | undefined;
+    const value = ev["value"] ?? ev["data"];
+
+    if (!Array.isArray(topics) || topics.length < 1 || value == null) return null;
+
+    const parsedTopics = topics.map((t) =>
+      typeof t === "string" ? xdr.ScVal.fromXDR(t, "base64") : (t as xdr.ScVal),
+    );
+    const parsedValue = typeof value === "string"
+      ? xdr.ScVal.fromXDR(value, "base64")
+      : value;
+
+    let eventName: string;
+    try {
+      eventName = String(scValToNative(parsedTopics[0]) ?? "");
+    } catch {
+      return null;
+    }
+    if (eventName !== "def_upd" && eventName !== "defaults_updated") return null;
+
+    const data = scValToNative(parsedValue as xdr.ScVal);
+    const arr = Array.isArray(data) ? data : Object.values((data as Record<string, unknown>) ?? {});
+    const asset = String(arr[0] ?? "");
+    const zkmeVerifier = String(arr[1] ?? "");
+    const cooperator = String(arr[2] ?? "");
+
+    return { asset, zkmeVerifier, cooperator };
   } catch {
     return null;
   }

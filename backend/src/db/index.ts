@@ -65,6 +65,18 @@ process.on("SIGTERM", async () => {
   await pool.end();
 });
 
+// ── Pool exhaustion alerting (#828) ───────────────────────────────────────────
+// Every 10 s, log at error level if the number of queued connection requests
+// exceeds DB_POOL_ALERT_WAITING (default 5). Healthy operation never logs here.
+if (process.env["NODE_ENV"] !== "test") {
+  setInterval(() => {
+    const waiting = pool.waitingCount;
+    if (waiting > config.dbPoolAlertWaiting) {
+      logger.error(`DB pool exhaustion: ${waiting} connections waiting`);
+    }
+  }, 10_000).unref();
+}
+
 // Validate on startup — exit immediately if DATABASE_URL is unreachable
 if (process.env["NODE_ENV"] !== "test") {
   validateConnection().catch((err) => {

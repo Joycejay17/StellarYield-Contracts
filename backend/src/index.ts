@@ -10,7 +10,10 @@ const app = createApp();
 const pruner = new EventsPruner();
 
 const server = app.listen(config.port, async () => {
-  logger.info({ port: config.port, env: config.nodeEnv }, "StellarYield backend started");
+  logger.info(
+    { port: config.port, env: config.nodeEnv, network: config.stellar.network },
+    `StellarYield backend started — Connected to Stellar ${config.stellar.network}`,
+  );
   try {
     await jobQueue.start();
   } catch (err) {

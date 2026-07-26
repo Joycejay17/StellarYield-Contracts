@@ -97,12 +97,12 @@ export async function backfillIndexer(req: Request, res: Response, next: NextFun
 
     await logAdminAudit(req, "backfill_indexer", "/api/v1/admin/indexer/backfill");
 
-    // Queue the backfill asynchronously (non-blocking)
-    indexer.queueBackfill(fromLedger, toLedger).catch((err) => {
-      logger.error({ err }, "Backfill error");
-    });
+    // Persist the backfill range as a pg-boss job so it survives a process
+    // restart, instead of the old in-memory queue (#846).
+    const jobId = await jobQueue.send("indexer-backfill", { fromLedger, toLedger });
 
-    res.status(202).json({ queued: true, fromLedger, toLedger });
+    // Return 202 Accepted immediately
+    res.status(202).json({ queued: true, fromLedger, toLedger, jobId });
   } catch (err) {
     next(err);
   }
@@ -781,6 +781,257 @@ export async function getPositionsSnapshot(req: Request, res: Response, next: Ne
         recordedAt: r.recorded_at,
       })),
     );
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── Issue #803: Vault compliance status ──────────────────────────────────────
+export async function getVaultComplianceStatus(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = contractAddressSchema.safeParse(req.params["contractId"]);
+    if (!parsed.success) {
+      res.status(400).json({ error: "BadRequest", message: "Invalid contractId format" });
+      return;
+    }
+    const contractId = parsed.data;
+
+    // Fetch vault fields needed for compliance flags
+    const vaultRows = await query<{
+      id: number;
+      zkme_verifier_address: string | null;
+      emergency: boolean;
+      paused: boolean;
+    }>(
+      `SELECT id, zkme_verifier_address, COALESCE(emergency, FALSE) AS emergency,
+              COALESCE(paused, FALSE) AS paused
+       FROM vaults
+       WHERE contract_id = $1`,
+      [contractId],
+    );
+
+    if (vaultRows.length === 0) {
+      res.status(404).json({ error: "NotFound", message: "Vault not found" });
+      return;
+    }
+
+    const vault = vaultRows[0];
+
+    // kycEnforced = zkmeVerifier is set and not the zero address
+    const ZERO_ADDRESS = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+    const kycEnforced =
+      vault.zkme_verifier_address !== null &&
+      vault.zkme_verifier_address !== "" &&
+      vault.zkme_verifier_address !== ZERO_ADDRESS;
+
+    // blacklistActive = at least one address is blacklisted for this vault
+    const blacklistRows = await query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM vault_blacklisted_addresses WHERE vault_id = $1`,
+      [vault.id],
+    );
+    const blacklistActive = parseInt(blacklistRows[0]?.count ?? "0", 10) > 0;
+
+    // lastPauseAt: most recent "paused" event for this contract
+    const pauseRows = await query<{ created_at: Date }>(
+      `SELECT created_at FROM indexed_events
+       WHERE contract_id = $1 AND event_type = 'paused'
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [contractId],
+    );
+    const lastPauseAt = pauseRows.length > 0 ? pauseRows[0].created_at.toISOString() : null;
+
+    res.json({
+      kycEnforced,
+      blacklistActive,
+      emergency: vault.emergency,
+      paused: vault.paused,
+      lastPauseAt,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── Issue #802: User compliance summary ──────────────────────────────────────
+export async function getUserComplianceSummary(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = stellarAddressSchema.safeParse(req.params["address"]);
+    if (!parsed.success) {
+      res.status(400).json({ error: "BadRequest", message: "Invalid address format" });
+      return;
+    }
+    const address = parsed.data;
+
+    // Fetch basic user fields
+    const userRows = await query<{
+      kyc_verified: boolean;
+      aml_flagged: boolean;
+    }>(
+      `SELECT kyc_verified, aml_flagged FROM users WHERE address = $1`,
+      [address],
+    );
+
+    // Defaults for users with no DB record (never interacted via API)
+    const kycVerified = userRows[0]?.kyc_verified ?? false;
+    const amlFlagged = userRows[0]?.aml_flagged ?? false;
+
+    // Aggregate financials from user_vault_positions
+    const financialRows = await query<{
+      total_deposited: string;
+      vault_count: string;
+    }>(
+      `SELECT
+         COALESCE(SUM(uvp.deposited), 0)::text AS total_deposited,
+         COUNT(*)::text AS vault_count
+       FROM user_vault_positions uvp
+       WHERE uvp.user_address = $1`,
+      [address],
+    );
+
+    const totalDeposited = financialRows[0]?.total_deposited ?? "0";
+    const vaultCount = parseInt(financialRows[0]?.vault_count ?? "0", 10);
+
+    // Total withdrawn: sum of amount_returned from withdraw events
+    const withdrawRows = await query<{ total: string }>(
+      `SELECT COALESCE(SUM((payload->>'assets')::numeric), 0)::text AS total
+       FROM indexed_events
+       WHERE event_type = 'withdraw'
+         AND payload->>'owner' = $1`,
+      [address],
+    );
+    const totalWithdrawn = withdrawRows[0]?.total ?? "0";
+
+    // Total yield claimed: sum from yield_claim events
+    const yieldRows = await query<{ total: string }>(
+      `SELECT COALESCE(SUM((payload->>'amount')::numeric), 0)::text AS total
+       FROM indexed_events
+       WHERE event_type = 'yield_claimed'
+         AND payload->>'user' = $1`,
+      [address],
+    );
+    const totalYieldClaimed = yieldRows[0]?.total ?? "0";
+
+    // First and last activity timestamps from indexed_events
+    const activityRows = await query<{
+      first_activity: Date | null;
+      last_activity: Date | null;
+    }>(
+      `SELECT
+         MIN(created_at) AS first_activity,
+         MAX(created_at) AS last_activity
+       FROM indexed_events
+       WHERE payload->>'user' = $1
+          OR payload->>'owner' = $1
+          OR payload->>'caller' = $1
+          OR payload->>'receiver' = $1`,
+      [address],
+    );
+
+    const firstActivity = activityRows[0]?.first_activity?.toISOString() ?? null;
+    const lastActivity = activityRows[0]?.last_activity?.toISOString() ?? null;
+
+    res.json({
+      address,
+      kycVerified,
+      amlFlagged,
+      totalDeposited,
+      totalWithdrawn,
+      totalYieldClaimed,
+      vaultCount,
+      firstActivity,
+      lastActivity,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── Issue #804: Data retention policy ────────────────────────────────────────
+const RETENTION_KEYS = ["eventsRetentionDays", "positionRetentionDays", "auditLogRetentionDays"] as const;
+type RetentionKey = (typeof RETENTION_KEYS)[number];
+
+export async function getRetentionPolicy(_req: Request, res: Response, next: NextFunction) {
+  try {
+    const rows = await query<{ key: string; value: string }>(
+      `SELECT key, value FROM app_config WHERE key = ANY($1)`,
+      [RETENTION_KEYS],
+    );
+
+    // Build response, falling back to defaults if a key is missing
+    const defaults: Record<RetentionKey, number> = {
+      eventsRetentionDays: 90,
+      positionRetentionDays: 365,
+      auditLogRetentionDays: 365,
+    };
+
+    const result = { ...defaults };
+    for (const row of rows) {
+      if (RETENTION_KEYS.includes(row.key as RetentionKey)) {
+        result[row.key as RetentionKey] = parseInt(row.value, 10);
+      }
+    }
+
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function patchRetentionPolicy(req: Request, res: Response, next: NextFunction) {
+  try {
+    const patchSchema = z.object({
+      eventsRetentionDays: z.number().int().positive().optional(),
+      positionRetentionDays: z.number().int().positive().optional(),
+      auditLogRetentionDays: z.number().int().positive().optional(),
+    }).strict();
+
+    const parsed = patchSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        error: "BadRequest",
+        message: "Values must be positive integers",
+        details: parsed.error.issues,
+      });
+      return;
+    }
+
+    const updates = parsed.data;
+
+    if (Object.keys(updates).length === 0) {
+      res.status(400).json({ error: "BadRequest", message: "No fields provided to update" });
+      return;
+    }
+
+    // Upsert each supplied key
+    for (const [key, value] of Object.entries(updates)) {
+      await query(
+        `INSERT INTO app_config (key, value, updated_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+        [key, String(value)],
+      );
+    }
+
+    // Return the full updated policy
+    const rows = await query<{ key: string; value: string }>(
+      `SELECT key, value FROM app_config WHERE key = ANY($1)`,
+      [RETENTION_KEYS],
+    );
+
+    const defaults: Record<RetentionKey, number> = {
+      eventsRetentionDays: 90,
+      positionRetentionDays: 365,
+      auditLogRetentionDays: 365,
+    };
+    const result = { ...defaults };
+    for (const row of rows) {
+      if (RETENTION_KEYS.includes(row.key as RetentionKey)) {
+        result[row.key as RetentionKey] = parseInt(row.value, 10);
+      }
+    }
+
+    res.json(result);
   } catch (err) {
     next(err);
   }

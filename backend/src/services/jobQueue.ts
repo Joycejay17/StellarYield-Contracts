@@ -43,6 +43,17 @@ class JobQueue {
       }
     });
 
+    await this.boss.work<Record<string, unknown>>("indexer-backfill", async (jobs: Job<Record<string, unknown>>[]) => {
+      const { processIndexerBackfill } = await import("./indexerBackfillWorker.js");
+      for (const job of jobs) {
+        const { fromLedger, toLedger } = job.data as {
+          fromLedger: number;
+          toLedger: number;
+        };
+        await processIndexerBackfill(fromLedger, toLedger);
+      }
+    });
+
     this.started = true;
     logger.info("pg-boss job queue started");
   }

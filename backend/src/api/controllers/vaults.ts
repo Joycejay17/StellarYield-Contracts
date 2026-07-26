@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { createHash } from "crypto";
 import { z } from "zod";
-import { VaultService } from "../../services/vault.js";
+import { VaultService, validateFilterTree, VAULT_FIELD_ALLOWLIST, pickVaultFields } from "../../services/vault.js";
 import { readTotalAssets, readVaultState, readPaused, readCooperator, readCooperatorFeeBps } from "../../services/stellar.js";
 import { query } from "../../db/index.js";
 import { AppError, ErrorCode } from "../middleware/errors.js";
@@ -40,6 +40,8 @@ export async function listVaults(req: Request, res: Response, next: NextFunction
       minTotalAssets,
       maxTotalAssets,
       q,
+      filter,
+      fields,
     } = req.query as unknown as {
       page: number;
       pageSize: number;
@@ -53,7 +55,38 @@ export async function listVaults(req: Request, res: Response, next: NextFunction
       minTotalAssets?: string;
       maxTotalAssets?: string;
       q?: string;
+      filter?: string;
+      fields?: string;
     };
+
+    // Parse and validate `filter` if provided
+    let parsedFilter: any | undefined;
+    if (typeof filter === "string" && filter.trim() !== "") {
+      try {
+        parsedFilter = JSON.parse(filter);
+      } catch (_e) {
+        res.status(400).json({ error: "BadRequest", message: "filter must be valid JSON" });
+        return;
+      }
+      const err = validateFilterTree(parsedFilter);
+      if (err) {
+        res.status(400).json({ error: "BadRequest", message: err });
+        return;
+      }
+    }
+
+    // Parse and validate `fields` if provided
+    let fieldsArray: string[] | undefined;
+    if (typeof fields === "string" && fields.trim() !== "") {
+      fieldsArray = fields.split(",").map((s) => s.trim()).filter(Boolean);
+      for (const f of fieldsArray) {
+        if (!(VAULT_FIELD_ALLOWLIST as string[]).includes(f)) {
+          res.status(400).json({ error: "BadRequest", message: `Unknown field "${f}" in fields param` });
+          return;
+        }
+      }
+    }
+
     const result = await vaultService.listVaults({
       page,
       pageSize,
@@ -67,6 +100,8 @@ export async function listVaults(req: Request, res: Response, next: NextFunction
       minTotalAssets,
       maxTotalAssets,
       q,
+      filter: parsedFilter,
+      fields: fieldsArray,
     });
     setCacheHeaders(res);
     res.json(result);
@@ -95,6 +130,17 @@ export async function listCategories(_req: Request, res: Response, next: NextFun
   }
 }
 
+export async function getVaultAggregates(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { state } = req.query as unknown as { state?: string };
+    const aggregates = await vaultService.getVaultAggregates(state);
+    setCacheHeaders(res);
+    res.json(aggregates);
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function listVaultsByFactory(req: Request, res: Response, next: NextFunction) {
   try {
     const vaults = await vaultService.listVaultsByFactory(String(req.params["factoryId"]));
@@ -107,27 +153,91 @@ export async function listVaultsByFactory(req: Request, res: Response, next: Nex
 
 export async function getVault(req: Request, res: Response, next: NextFunction) {
   try {
-    const vault = await vaultService.getVault(String(req.params["contractId"]));
-    if (!vault) {
-      throw new AppError(ErrorCode.VAULT_NOT_FOUND, "Vault not found", 404);
+    const contractId = String(req.params["contractId"]);
+
+    const { fields, embed } = req.query as unknown as { fields?: string; embed?: string };
+
+    // Validate and parse fields
+    let fieldsArray: string[] | undefined;
+    if (typeof fields === "string" && fields.trim() !== "") {
+      fieldsArray = fields.split(",").map((s) => s.trim()).filter(Boolean);
+      for (const f of fieldsArray) {
+        if (!(VAULT_FIELD_ALLOWLIST as string[]).includes(f)) {
+          res.status(400).json({ error: "BadRequest", message: `Unknown field "${f}" in fields param` });
+          return;
+        }
+      }
     }
+
+    // Validate embed values
+    const embedArray = (typeof embed === "string" && embed.trim() !== "")
+      ? embed.split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+    const allowedEmbeds = ["positions", "epochs", "operators", "roles"];
+    for (const e of embedArray) {
+      if (!allowedEmbeds.includes(e)) {
+        res.status(400).json({ error: "BadRequest", message: `Unknown embed "${e}"` });
+        return;
+      }
+    }
+
+    const vault = await vaultService.getVault(contractId);
+    if (!vault) {
+      res.status(404).json({ error: "NotFound", message: "Vault not found" });
+      return;
+    }
+
+    // ETag / Last-Modified handling preserved
     const etag = `W/"${createHash("sha1").update(JSON.stringify(vault)).digest("hex")}"`;
-    if (req.headers["if-none-match"] === etag) {
+    const updatedAt = vault.updatedAt instanceof Date ? vault.updatedAt : undefined;
+    if (req.headers?.["if-none-match"] === etag) {
       res.status(304).end();
       return;
     }
-    const ifModifiedSince = req.headers["if-modified-since"];
-    if (ifModifiedSince) {
+    const ifModifiedSince = req.headers?.["if-modified-since"];
+    if (ifModifiedSince && updatedAt) {
       const since = new Date(ifModifiedSince);
-      if (!isNaN(since.getTime()) && vault.updatedAt <= since) {
+      if (!isNaN(since.getTime()) && updatedAt <= since) {
         res.status(304).end();
         return;
       }
     }
+
+    // Apply sparse fieldset if requested
+    let out: Record<string, unknown> | any = vault;
+    if (fieldsArray && fieldsArray.length > 0) {
+      out = pickVaultFields(vault, fieldsArray);
+    }
+
+    // Apply embedding (detail endpoint only)
+    for (const e of embedArray) {
+      try {
+        switch (e) {
+          case "positions":
+            out.positions = await vaultService.getVaultPositions(contractId);
+            break;
+          case "epochs":
+            out.epochs = await vaultService.getVaultEpochs(contractId);
+            break;
+          case "operators":
+            out.operators = await vaultService.listVaultOperators(contractId);
+            break;
+          case "roles":
+            out.roles = await vaultService.listVaultRoles(contractId);
+            break;
+          default:
+            out[e] = [];
+        }
+      } catch (embedErr) {
+        next(embedErr);
+        return;
+      }
+    }
+
     setCacheHeaders(res);
     res.set("ETag", etag);
     res.set("Last-Modified", vault.updatedAt.toUTCString());
-    res.json(vault);
+    res.json(out);
   } catch (err) {
     next(err);
   }
