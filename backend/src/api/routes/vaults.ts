@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import {
   listVaults,
+  getVaultAggregates,
   getVaultCount,
   listVaultsByFactory,
   getVault,
@@ -97,6 +98,10 @@ const listVaultsQuerySchema = z
     minTotalAssets: nonNegativeAmountSchema.optional(),
     maxTotalAssets: nonNegativeAmountSchema.optional(),
     q: z.string().optional(),
+    // Compound filter tree as JSON string (validated in controller)
+    filter: z.string().optional(),
+    // Comma-separated camelCase fields to include in responses
+    fields: z.string().optional(),
   })
   .superRefine((value, ctx) => {
     const parsed = parseVaultSort(value.sort, value.order);
@@ -162,11 +167,17 @@ const maturingSoonQuerySchema = z.object({
   days: z.coerce.number().int().min(1).max(90).default(30),
 });
 
+// Detail endpoint query params: allow `fields` (comma-separated) and `embed` (comma-separated)
+const vaultDetailQuerySchema = z.object({ fields: z.string().optional(), embed: z.string().optional() });
+
 export const vaultsRouter = Router();
 
 vaultsRouter.get("/categories", listCategories);
 vaultsRouter.get("/", validateQuery(listVaultsQuerySchema), listVaults);
 vaultsRouter.get("/count", getVaultCount);
+// Aggregates endpoint (placed before dynamic :contractId routes)
+const aggregatesQuerySchema = z.object({ state: z.string().optional() });
+vaultsRouter.get("/aggregates", validateQuery(aggregatesQuerySchema), getVaultAggregates);
 // Search, filter, and discovery endpoints (#640–#643, #644, #645)
 vaultsRouter.get("/search", validateQuery(searchVaultsQuerySchema), searchVaults);
 vaultsRouter.get("/name-check", checkVaultName);
@@ -176,7 +187,7 @@ vaultsRouter.get("/maturing-soon", validateQuery(maturingSoonQuerySchema), getMa
 vaultsRouter.get("/fully-funded", getFullyFundedVaults);
 vaultsRouter.get("/stream", streamVaultEvents);
 vaultsRouter.get("/factory/:factoryId", validateParams(vaultFactoryParamsSchema), listVaultsByFactory);
-vaultsRouter.get("/:contractId", validateParams(vaultParamsSchema), getVault);
+vaultsRouter.get("/:contractId", validateParams(vaultParamsSchema), validateQuery(vaultDetailQuerySchema), getVault);
 vaultsRouter.get("/:contractId/state/live", validateParams(vaultParamsSchema), getVaultLiveState);
 vaultsRouter.get("/:contractId/total-assets/live", validateParams(vaultParamsSchema), getVaultLiveTotalAssets);
 vaultsRouter.get("/:contractId/redemption-queue", validateParams(vaultParamsSchema), getRedemptionQueue);
