@@ -7,6 +7,7 @@ import { config } from "../config.js";
 import { schema } from "./schema.js";
 import { root } from "./resolvers.js";
 import { createGraphQLContext, type GraphQLContext } from "./context.js";
+import { depthLimitRule, complexityLimitRule } from "./queryLimits.js";
 
 /**
  * Apollo Server instance backed by the existing graphql-js schema/rootValue
@@ -17,6 +18,9 @@ export const apolloServer = new ApolloServer<GraphQLContext>({
   schema,
   rootValue: root,
   introspection: config.nodeEnv !== "production",
+  // Depth/complexity limits guard against deeply nested or overly broad
+  // queries driving excessive DB load (#774).
+  validationRules: [depthLimitRule, complexityLimitRule],
   plugins: [
     config.nodeEnv === "development"
       ? ApolloServerPluginLandingPageLocalDefault()
