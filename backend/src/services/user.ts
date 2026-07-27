@@ -46,6 +46,9 @@ export class UserService {
     this.emitter.emit("position:updated", { address, vaultContractId, shares, deposited });
   }
 
+  /**
+   * Look up a user by wallet address. Returns `null` if the user does not exist.
+   */
   async getUser(address: string): Promise<User | null> {
     const result = await query<{
       id: number;
@@ -79,6 +82,9 @@ export class UserService {
     };
   }
 
+  /**
+   * Create or update a user record. Sets `kyc_verified` on insert or update.
+   */
   async upsertUser(address: string, kycVerified = false): Promise<void> {
     await query(
       `INSERT INTO users (address, kyc_verified) 
@@ -90,6 +96,9 @@ export class UserService {
     );
   }
 
+  /**
+   * Aggregate pending yield across every vault the user has a position in.
+   */
   async getTotalPendingYield(address: string): Promise<string> {
     const positions = await query<{
       contract_id: string;
@@ -135,6 +144,10 @@ export class UserService {
     return { totalClaimed, totalPendingYield };
   }
 
+  /**
+   * Fetch a user's full portfolio: all vault positions, total deposited,
+   * total pending yield, and combined total value.
+   */
   async getUserPortfolio(address: string): Promise<UserPortfolioResponse> {
     const positions = await query<{
       id: number;
@@ -447,6 +460,9 @@ export class UserService {
     }));
   }
 
+  /**
+   * Return the total number of registered users.
+   */
   async countUsers(): Promise<number> {
     const result = await query<{ count: string }>("SELECT COUNT(*) as count FROM users");
     return parseInt(result[0]?.count ?? "0", 10);

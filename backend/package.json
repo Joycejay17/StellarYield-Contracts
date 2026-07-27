@@ -20,6 +20,7 @@
     "rotate-api-key": "tsx src/scripts/rotate-api-key.ts",
     "import-from-factory": "tsx src/scripts/import-from-factory.ts",
     "backfill-cooperator": "tsx src/scripts/backfill-cooperator.ts",
+    "resync-vault": "tsx src/scripts/resync-vault.ts",
     "indexer": "node dist/indexer/index.js",
     "operator-expiry-task": "node dist/tasks/operatorExpiry.js"
   },
@@ -51,7 +52,11 @@
     "prom-client": "^15.1.3",
     "swagger-ui-express": "^5.0.1",
     "winston": "^3.11.0",
-    "zod": "^3.23.0"
+    "zod": "^3.23.0",
+    "@opentelemetry/sdk-node": "^0.57.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.57.0",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.57.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.15.0",

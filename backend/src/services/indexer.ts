@@ -11,6 +11,7 @@ import {
 } from "./stellar.js";
 import { VaultService } from "./vault.js";
 import { UserService } from "./user.js";
+import { YieldService } from "./yield.js";
 import { NotificationService } from "./notifications.js";
 import { indexerEventsProcessedTotal, indexerLastLedger } from "./metrics.js";
 import { cacheDel } from "../cache/redis.js";
@@ -666,6 +667,26 @@ export class Indexer {
       return;
     }
 
+    const adminTransferred = parseAdminTransferredEvent(event);
+    if (adminTransferred) {
+      await this.handleAdminTransferred(event.ledger ?? 0, adminTransferred);
+      await this.recordEvent(event, "adm_xfr", {
+        oldAdmin: adminTransferred.oldAdmin,
+        newAdmin: adminTransferred.newAdmin,
+      });
+      return;
+    }
+
+    const defaultsUpdated = parseDefaultsUpdatedEvent(event);
+    if (defaultsUpdated) {
+      await this.recordEvent(event, "def_upd", {
+        asset: defaultsUpdated.asset,
+        zkmeVerifier: defaultsUpdated.zkmeVerifier,
+        cooperator: defaultsUpdated.cooperator,
+      });
+      return;
+    }
+
     const kycSet = parseKycSetEvent(event);
     if (kycSet) {
       await this.handleKycSet(event.contractId ?? "", kycSet);
@@ -990,6 +1011,24 @@ export class Indexer {
     );
     await cacheDel(`pending-yield:${contractId}:${userAddress}`);
     logger.info({ contractId, userAddress, epoch }, "Processed yield_claimed event");
+
+    // Check if epoch is now fully claimed and fire webhook (#819)
+    try {
+      const yieldService = new YieldService();
+      const result = await yieldService.closeEpochIfFullyClaimed(contractId, epoch);
+      if (result) {
+        const notificationService = new NotificationService();
+        await notificationService.notify("epoch.closed", {
+          contractId,
+          epoch,
+          yieldAmount: result.epochData.yieldAmount,
+          closedAt: result.epochData.closedAt,
+        });
+        logger.info({ contractId, epoch }, "Fired epoch.closed webhook");
+      }
+    } catch (err) {
+      logger.warn({ contractId, epoch, err }, "Failed to check epoch close after yield claim");
+    }
   }
 
   private async handleEarlyRedemptionProcessed(
@@ -1269,6 +1308,18 @@ export class Indexer {
       [ev.newVerifier, contractId],
     );
     logger.info({ contractId, verifier: ev.newVerifier }, "Processed zkme_upd event");
+  }
+
+  private async handleAdminTransferred(
+    ledger: number,
+    ev: { oldAdmin: string; newAdmin: string },
+  ): Promise<void> {
+    await query(
+      `INSERT INTO factory_admin_history (old_admin, new_admin, ledger, recorded_at)
+       VALUES ($1, $2, $3, NOW())`,
+      [ev.oldAdmin, ev.newAdmin, ledger],
+    );
+    logger.info({ oldAdmin: ev.oldAdmin, newAdmin: ev.newAdmin, ledger }, "Processed adm_xfr event");
   }
 
   private async handleKycSet(
@@ -2134,6 +2185,92 @@ export function parseZkmeVerifierUpdatedEvent(rawEvent: unknown): ParsedZkmeVeri
     const newVerifier = String(arr[1] ?? "");
 
     return { caller, oldVerifier, newVerifier };
+  } catch {
+    return null;
+  }
+}
+
+// ── Issue #839: parseAdminTransferredEvent ────────────────────────────────────
+
+export interface ParsedAdminTransferredEvent {
+  oldAdmin: string;
+  newAdmin: string;
+}
+
+export function parseAdminTransferredEvent(rawEvent: unknown): ParsedAdminTransferredEvent | null {
+  try {
+    if (!rawEvent || typeof rawEvent !== "object") return null;
+    const ev = rawEvent as Record<string, unknown>;
+    const topics = (ev["topic"] ?? ev["topics"]) as unknown[] | undefined;
+    const value = ev["value"] ?? ev["data"];
+
+    if (!Array.isArray(topics) || topics.length < 1 || value == null) return null;
+
+    const parsedTopics = topics.map((t) =>
+      typeof t === "string" ? xdr.ScVal.fromXDR(t, "base64") : (t as xdr.ScVal),
+    );
+    const parsedValue = typeof value === "string"
+      ? xdr.ScVal.fromXDR(value, "base64")
+      : value;
+
+    let eventName: string;
+    try {
+      eventName = String(scValToNative(parsedTopics[0]) ?? "");
+    } catch {
+      return null;
+    }
+    if (eventName !== "adm_xfr" && eventName !== "admin_transferred") return null;
+
+    const data = scValToNative(parsedValue as xdr.ScVal);
+    const arr = Array.isArray(data) ? data : Object.values((data as Record<string, unknown>) ?? {});
+    const oldAdmin = String(arr[0] ?? "");
+    const newAdmin = String(arr[1] ?? "");
+
+    return { oldAdmin, newAdmin };
+  } catch {
+    return null;
+  }
+}
+
+// ── Issue #841: parseDefaultsUpdatedEvent ─────────────────────────────────────
+
+export interface ParsedDefaultsUpdatedEvent {
+  asset: string;
+  zkmeVerifier: string;
+  cooperator: string;
+}
+
+export function parseDefaultsUpdatedEvent(rawEvent: unknown): ParsedDefaultsUpdatedEvent | null {
+  try {
+    if (!rawEvent || typeof rawEvent !== "object") return null;
+    const ev = rawEvent as Record<string, unknown>;
+    const topics = (ev["topic"] ?? ev["topics"]) as unknown[] | undefined;
+    const value = ev["value"] ?? ev["data"];
+
+    if (!Array.isArray(topics) || topics.length < 1 || value == null) return null;
+
+    const parsedTopics = topics.map((t) =>
+      typeof t === "string" ? xdr.ScVal.fromXDR(t, "base64") : (t as xdr.ScVal),
+    );
+    const parsedValue = typeof value === "string"
+      ? xdr.ScVal.fromXDR(value, "base64")
+      : value;
+
+    let eventName: string;
+    try {
+      eventName = String(scValToNative(parsedTopics[0]) ?? "");
+    } catch {
+      return null;
+    }
+    if (eventName !== "def_upd" && eventName !== "defaults_updated") return null;
+
+    const data = scValToNative(parsedValue as xdr.ScVal);
+    const arr = Array.isArray(data) ? data : Object.values((data as Record<string, unknown>) ?? {});
+    const asset = String(arr[0] ?? "");
+    const zkmeVerifier = String(arr[1] ?? "");
+    const cooperator = String(arr[2] ?? "");
+
+    return { asset, zkmeVerifier, cooperator };
   } catch {
     return null;
   }

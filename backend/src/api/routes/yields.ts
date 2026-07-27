@@ -3,10 +3,13 @@ import { z } from "zod";
 import {
   getVaultEpochs,
   getEpochDetail,
+  getBulkEpochs,
   getUserPendingYield,
   getYieldSummary,
   getYieldPerShareHistory,
   getYieldTimeline,
+  compareEpochs,
+  getNextEpochProjection,
 } from "../controllers/yields.js";
 import { getYieldsStream } from "../controllers/yields-stream.js";
 import { validateQuery, validateParams } from "../middleware/validate.js";
@@ -56,11 +59,23 @@ export const yieldsRouter = Router();
 yieldsRouter.get("/stream", sseLimitPerIp(), getYieldsStream);
 yieldsRouter.get("/:contractId/summary", getYieldSummary);
 yieldsRouter.get("/:contractId/epochs", validateQuery(epochQuerySchema), getVaultEpochs);
+yieldsRouter.get("/:contractId/epochs/bulk", getBulkEpochs);
 yieldsRouter.get(
   "/:contractId/epochs/:epoch",
   validateParams(epochDetailParamsSchema),
   getEpochDetail,
 );
+
+// ── Epoch comparison (#820) ──────────────────────────────────────────────────
+const epochCompareQuerySchema = z.object({
+  a: z.coerce.number().int().positive(),
+  b: z.coerce.number().int().positive(),
+});
+yieldsRouter.get("/:contractId/epochs/compare", validateQuery(epochCompareQuerySchema), compareEpochs);
+
+// ── Next epoch projection (#821) ─────────────────────────────────────────────
+yieldsRouter.get("/:contractId/next-epoch-projection", getNextEpochProjection);
+
 yieldsRouter.get("/:contractId/yield-per-share-history", validateQuery(yieldHistoryQuerySchema), getYieldPerShareHistory);
 yieldsRouter.get("/:contractId/pending/:userAddress", getUserPendingYield);
 
