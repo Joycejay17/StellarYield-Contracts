@@ -178,3 +178,26 @@ export interface AnalyticsSummary {
   totalYieldDistributed: string;
   totalDepositors: number;
 }
+
+export interface TvlAggregate {
+  totalValueLocked: string;
+  activeVaultCount: number;
+  fundingVaultCount: number;
+}
+
+export interface PortfolioAllocation {
+  category: string;
+  deposited: string;
+  percentage: number;
+}
+
+export interface PortfolioAllocationResponse {
+  allocations: PortfolioAllocation[];
+}
+
+export interface PortfolioDiversification {
+  score: number;
+  vaultCount: number;
+  categoryCount: number;
+  herfindahlIndex: number;
+}
