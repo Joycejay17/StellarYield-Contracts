@@ -4,7 +4,6 @@ This document supports **professional security audits** and internal review by s
 
 Formal notation uses standard math; `∀` denotes “for all,” `Σ` sum over all users/epochs where defined.
 
----
 
 ## 1. Invariants
 

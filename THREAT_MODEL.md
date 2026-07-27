@@ -4,7 +4,7 @@ This document complements **`SECURITY.md`** with entry-point analysis, **authori
 
 **Scope:** `soroban-contracts/contracts/single_rwa_vault`, `soroban-contracts/contracts/vault_factory`.
 
----
+
 
 ## 1. Entry-point analysis (summary)
 
@@ -46,7 +46,6 @@ This document complements **`SECURITY.md`** with entry-point analysis, **authori
 | `get_*`, `is_*`, `*_paginated` | None | Reads. |
 | `transfer_admin`, `set_operator`, `set_defaults`, `set_vault_wasm_hash` | Admin | Configuration. |
 
----
 
 ## 2. Authorization requirements matrix
 
@@ -58,7 +57,6 @@ Legend: **A** = admin, **O** = operator, **U** = authenticated user (`require_au
 | **Role check** | KYC, not blacklisted | + state Active/Matured | + state | `require_admin` / `require_operator` | `require_operator_or_admin` |
 | **Pause** | Blocked | Blocked | Blocked | Varies | Varies |
 
----
 
 ## 3. Data flow diagrams
 
