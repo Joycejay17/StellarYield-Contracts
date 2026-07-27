@@ -213,6 +213,36 @@ export async function getUserPortfolioPnl(
   }
 }
 
+export async function getUserPortfolioAllocation(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const allocation = await userService.getUserPortfolioAllocation(
+      String(req.params["address"]),
+    );
+    res.json(allocation);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getUserPortfolioDiversification(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const diversification = await userService.getUserPortfolioDiversification(
+      String(req.params["address"]),
+    );
+    res.json(diversification);
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getUserIncomeForecast(
   req: Request,
   res: Response,
