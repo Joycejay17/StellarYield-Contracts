@@ -1,39 +1,63 @@
-# Pull Request: Add vault search, name-check, trending, and new vaults endpoints
+# Pull Request: Add GraphQL query limiting, public TVL, and portfolio analytics endpoints
 
-This PR adds four new API endpoints for vault discovery and search.
+This PR adds GraphQL query depth/complexity limiting and three new analytics endpoints.
 
-Closes #640
-Closes #641
-Closes #642
-Closes #643
+Closes #774
+Closes #775
+Closes #776
+Closes #777
 
 ## Issues Fixed
 
-### 1. `GET /api/v1/vaults/search` (#640)
-- Combined search endpoint accepting `q`, `category`, `state`, `sort`, `order`, `page`, `pageSize`.
-- Filters are applied independently (AND logic) with full Zod validation.
-- Text search (`q`) matches against `name`, `symbol`, and `rwa_name` (case-insensitive ILIKE).
-- Category filter matches against `rwa_name`.
-- Returns paginated vault list in the same shape as `GET /api/v1/vaults`.
+### 1. GraphQL query depth and complexity limiting (#774)
 
-### 2. `GET /api/v1/vaults/name-check` (#641)
-- Accepts `name` query parameter, returns `{ "available": true | false }`.
-- Case-insensitive check: `WHERE LOWER(name) = LOWER($1)`.
-- Returns HTTP 400 if name is missing or under 3 characters.
+Deep or complex GraphQL queries can cause excessive DB load. This adds validation-level
+limits to the existing Apollo Server:
 
-### 3. `GET /api/v1/vaults/trending` (#642)
-- Returns top 10 vaults ordered by sum of deposited amounts in the last 24 hours.
-- Includes `contractId`, `name`, `recentDepositVolume` (sum as string).
-- Returns `[]` if no deposits occurred recently.
+- Installed `graphql-depth-limit` and `graphql-query-complexity`.
+- New `src/graphql/queryLimits.ts` exports `depthLimitRule` and `complexityLimitRule`,
+  wired into `ApolloServer`'s `validationRules`.
+- Max depth: 7. Exceeding it returns `Query depth {n} exceeds maximum of 7`.
+- Max complexity: 200, via a custom estimator where every field costs 1 and any
+  field whose type resolves to a list costs 10. Exceeding it returns
+  `Query complexity {n} exceeds maximum of 200`.
 
-### 4. `GET /api/v1/vaults/new` (#643)
-- Returns vaults created within the given number of days (1–30, default 7).
-- Accepts `days` query param to adjust the window.
-- Returns the same vault shape as `GET /api/v1/vaults`.
+### 2. Public cross-vault TVL aggregate (#775)
+
+`GET /api/v1/admin/stats` includes platform-wide TVL but is admin-gated. Dashboards need
+a public equivalent:
+
+- `GET /api/v1/analytics/tvl` returns `{ totalValueLocked, activeVaultCount, fundingVaultCount }`.
+- `totalValueLocked` sums `total_assets` across all non-archived vaults; the two counts
+  are vaults in the `Active` and `Funding` states respectively.
+- No authentication required — mounted on the existing public `analyticsRouter`.
+- Response includes `Cache-Control: max-age=30`.
+
+### 3. Portfolio asset allocation breakdown (#776)
+
+- `GET /api/v1/users/:address/portfolio/allocation` returns
+  `{ allocations: [{ category, deposited, percentage }] }`.
+- Groups a user's positions by `vaults.rwa_category` (falling back to `"Uncategorized"`),
+  summing `deposited` per category.
+- `percentage` is left unrounded (`categoryDeposited / totalDeposited * 100`) so that
+  percentages across categories sum to 100 within floating-point precision.
+- Returns `{ allocations: [] }` for a user with no positions.
+
+### 4. Portfolio diversification score (#777)
+
+- `GET /api/v1/users/:address/portfolio/diversification` returns
+  `{ score, vaultCount, categoryCount, herfindahlIndex }`.
+- `herfindahlIndex` is the sum of squared per-vault deposit shares — lower means more
+  diversified.
+- `score = (1 - herfindahlIndex) * 100`, rounded to one decimal place.
+- A user with a single position gets `score: 0`; a user with equal deposits across
+  four vaults gets `score: 75`.
 
 ## Verification
 
-- `npm run lint` — clean (0 errors, 0 warnings)
-- `npm run build` — success
-- `npm run test` — all unit tests pass (2 pre-existing E2E failures require database)
-- New routes registered before `/:contractId` to avoid Express route conflicts
+- `npx tsc --noEmit` — clean
+- New tests added: `src/graphql/queryLimits.test.ts`, `src/api/controllers/analytics.test.ts`,
+  `src/services/user.portfolio-analytics.test.ts`
+- `npx vitest run` — all tests pass except two pre-existing, unrelated flakes
+  (`src/services/indexer.test.ts`, `src/api/controllers/admin.test.ts`), both confirmed
+  present on `main` prior to this change and passing when run in isolation

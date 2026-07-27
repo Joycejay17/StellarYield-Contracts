@@ -9,6 +9,9 @@ import type {
   PortfolioPnlPosition,
   IncomeForecastResponse,
   IncomeForecastMonth,
+  PortfolioAllocation,
+  PortfolioAllocationResponse,
+  PortfolioDiversification,
 } from "../types/index.js";
 import { EventEmitter } from "node:events";
 import { query } from "../db/index.js";
@@ -204,6 +207,78 @@ export class UserService {
       totalPendingYield: totalPendingYield.toString(),
       totalValue,
     };
+  }
+
+  /** Portfolio allocation by RWA category, weighted by deposited amount (#776). */
+  async getUserPortfolioAllocation(address: string): Promise<PortfolioAllocationResponse> {
+    const rows = await query<{ category: string; deposited: string }>(
+      `SELECT COALESCE(v.rwa_category, 'Uncategorized') AS category,
+              SUM(uvp.deposited)::text AS deposited
+       FROM user_vault_positions uvp
+       JOIN vaults v ON uvp.vault_id = v.id
+       WHERE uvp.user_address = $1
+       GROUP BY COALESCE(v.rwa_category, 'Uncategorized')
+       ORDER BY SUM(uvp.deposited) DESC`,
+      [address],
+    );
+
+    if (rows.length === 0) {
+      return { allocations: [] };
+    }
+
+    const totalDeposited = rows.reduce(
+      (sum, row) => sum + BigInt(row.deposited || "0"),
+      BigInt(0),
+    );
+
+    const allocations: PortfolioAllocation[] = rows.map((row) => {
+      const deposited = BigInt(row.deposited || "0");
+      const percentage =
+        totalDeposited > 0n ? (Number(deposited) / Number(totalDeposited)) * 100 : 0;
+      return {
+        category: row.category,
+        deposited: deposited.toString(),
+        percentage,
+      };
+    });
+
+    return { allocations };
+  }
+
+  /**
+   * Portfolio diversification score derived from the Herfindahl-Hirschman
+   * Index over per-vault deposited shares — lower HHI (spread across more
+   * vaults) yields a higher score (#777).
+   */
+  async getUserPortfolioDiversification(address: string): Promise<PortfolioDiversification> {
+    const rows = await query<{ category: string; deposited: string }>(
+      `SELECT v.rwa_category AS category, uvp.deposited::text AS deposited
+       FROM user_vault_positions uvp
+       JOIN vaults v ON uvp.vault_id = v.id
+       WHERE uvp.user_address = $1 AND uvp.deposited::numeric > 0`,
+      [address],
+    );
+
+    const vaultCount = rows.length;
+    const categoryCount = new Set(rows.map((row) => row.category ?? "Uncategorized")).size;
+
+    if (vaultCount === 0) {
+      return { score: 0, vaultCount: 0, categoryCount: 0, herfindahlIndex: 0 };
+    }
+
+    const totalDeposited = rows.reduce(
+      (sum, row) => sum + BigInt(row.deposited || "0"),
+      BigInt(0),
+    );
+
+    const herfindahlIndex = rows.reduce((sum, row) => {
+      const share = Number(BigInt(row.deposited || "0")) / Number(totalDeposited);
+      return sum + share * share;
+    }, 0);
+
+    const score = Math.round((1 - herfindahlIndex) * 100 * 10) / 10;
+
+    return { score, vaultCount, categoryCount, herfindahlIndex };
   }
 
   async getUserPortfolioPnl(address: string): Promise<PortfolioPnlResponse> {

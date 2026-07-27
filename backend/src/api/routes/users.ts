@@ -9,6 +9,8 @@ import {
   getUserKyc,
   getUserKycHistory,
   getUserPortfolio,
+  getUserPortfolioAllocation,
+  getUserPortfolioDiversification,
   getUserPortfolioPnl,
   getUserShareHistory,
   getUserYieldHistory,
@@ -123,6 +125,16 @@ usersRouter.get(
   "/:address/portfolio/pnl",
   validateParams(addressParamSchema),
   getUserPortfolioPnl,
+);
+usersRouter.get(
+  "/:address/portfolio/allocation",
+  validateParams(addressParamSchema),
+  getUserPortfolioAllocation,
+);
+usersRouter.get(
+  "/:address/portfolio/diversification",
+  validateParams(addressParamSchema),
+  getUserPortfolioDiversification,
 );
 usersRouter.get(
   "/:address/portfolio/income-forecast",
