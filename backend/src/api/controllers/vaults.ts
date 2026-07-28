@@ -642,64 +642,32 @@ export async function getVaultAnnualReport(req: Request, res: Response, next: Ne
     }
     const vaultId = vaultRow[0].id;
 
-    const yearStart = new Date(`${year}-01-01T00:00:00.000Z`);
-    const yearEnd = new Date(`${year + 1}-01-01T00:00:00.000Z`);
-
-    // Aggregate epoch data for the requested year
-    const epochRows = await query<{ epoch_count: string; total_yield: string }>(
-      `SELECT COUNT(*)::text AS epoch_count,
-              COALESCE(SUM(yield_amount::numeric), 0)::text AS total_yield
-       FROM epochs
-       WHERE vault_id = $1
-         AND distributed_at >= $2
-         AND distributed_at < $3`,
-      [vaultId, yearStart, yearEnd],
+    // Check cached_reports first (Issue #852)
+    const cachedRows = await query<{ data: unknown }>(
+      `SELECT data FROM cached_reports
+       WHERE vault_id = $1 AND report_type = 'annual' AND report_year = $2`,
+      [vaultId, year],
     );
+    if (cachedRows.length > 0) {
+      setCacheHeaders(res);
+      res.json(cachedRows[0].data);
+      return;
+    }
 
-    const epochCount = parseInt(epochRows[0]?.epoch_count ?? "0", 10);
-    const totalYieldDistributed = epochRows[0]?.total_yield ?? "0";
-    const totalYieldBig = BigInt(Math.round(parseFloat(totalYieldDistributed)));
-    const averageYieldPerEpoch = epochCount > 0
-      ? (totalYieldBig / BigInt(epochCount)).toString()
-      : "0";
+    const { computeAnnualReportData } = await import("../../services/reportWorker.js");
+    const reportData = await computeAnnualReportData(vaultId, year);
 
-    // Nearest snapshot at or after year start (startTotalAssets)
-    const startSnapshotRows = await query<{ total_assets: string }>(
-      `SELECT total_assets::text
-       FROM vault_tvl_snapshots
-       WHERE vault_id = $1 AND recorded_at >= $2
-       ORDER BY recorded_at ASC
-       LIMIT 1`,
-      [vaultId, yearStart],
+    // Save to cache for subsequent calls
+    await query(
+      `INSERT INTO cached_reports (vault_id, report_type, report_year, data, generated_at)
+       VALUES ($1, 'annual', $2, $3, NOW())
+       ON CONFLICT (vault_id, report_type, report_year)
+       DO UPDATE SET data = EXCLUDED.data, generated_at = NOW()`,
+      [vaultId, year, JSON.stringify(reportData)],
     );
-
-    // Nearest snapshot at or before year end (endTotalAssets)
-    const endSnapshotRows = await query<{ total_assets: string }>(
-      `SELECT total_assets::text
-       FROM vault_tvl_snapshots
-       WHERE vault_id = $1 AND recorded_at < $2
-       ORDER BY recorded_at DESC
-       LIMIT 1`,
-      [vaultId, yearEnd],
-    );
-
-    const startTotalAssets = startSnapshotRows[0]?.total_assets ?? "0";
-    const endTotalAssets = endSnapshotRows[0]?.total_assets ?? "0";
-
-    const startBig = BigInt(Math.round(parseFloat(startTotalAssets)));
-    const endBig = BigInt(Math.round(parseFloat(endTotalAssets)));
-    const netAssetGrowth = (endBig - startBig).toString();
 
     setCacheHeaders(res);
-    res.json({
-      year,
-      totalYieldDistributed: totalYieldBig.toString(),
-      epochCount,
-      averageYieldPerEpoch,
-      startTotalAssets: startBig.toString(),
-      endTotalAssets: endBig.toString(),
-      netAssetGrowth,
-    });
+    res.json(reportData);
   } catch (err) {
     next(err);
   }
