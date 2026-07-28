@@ -74,8 +74,8 @@ describe("Indexer", () => {
     await indexer.tick();
 
     expect(spy).toHaveBeenCalledTimes(2);
-    expect(spy).toHaveBeenCalledWith(events[0]);
-    expect(spy).toHaveBeenCalledWith(events[1]);
+    expect(spy.mock.calls[0][0]).toBe(events[0]);
+    expect(spy.mock.calls[1][0]).toBe(events[1]);
   });
 
   it("logs a warning and does not throw on RPC error", async () => {

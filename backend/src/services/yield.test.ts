@@ -145,7 +145,7 @@ describe("YieldService", () => {
 
       expect(query).toHaveBeenCalledWith(
         expect.stringContaining("INSERT INTO epochs"),
-        [10, 1, "1000", "50000"],
+        [10, 1, "1000", "50000", null],
       );
       expect(query.mock.calls[0][0]).toContain("ON CONFLICT (vault_id, epoch) DO NOTHING");
     });
@@ -161,7 +161,7 @@ describe("YieldService", () => {
       for (const call of query.mock.calls) {
         expect(call[0]).toContain("INSERT INTO epochs");
         expect(call[0]).toContain("ON CONFLICT (vault_id, epoch) DO NOTHING");
-        expect(call[1]).toEqual([10, 7, "2500", "100000"]);
+        expect(call[1]).toEqual([10, 7, "2500", "100000", null]);
       }
     });
   });

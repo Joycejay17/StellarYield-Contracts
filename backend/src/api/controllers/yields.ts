@@ -187,7 +187,10 @@ export async function getBulkEpochs(req: Request, res: Response, next: NextFunct
 
     const epochs = await yieldService.getEpochsBulk(contractId, from, to);
     res.json(epochs);
+  } catch (err) {
+    next(err);
   }
+}
 
 export async function getYieldTimeline(req: Request, res: Response, next: NextFunction) {
   try {

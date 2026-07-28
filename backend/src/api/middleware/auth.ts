@@ -41,10 +41,15 @@ export function requireApiKey(options?: { role?: string; minRole?: "readonly" | 
     const plaintext = authHeader.slice(7);
     const keyHash = createHash("sha256").update(plaintext).digest("hex");
 
-    const rows = await query<ApiKey>(
-      'SELECT id, role, label, expires_at AS "expiresAt" FROM api_keys WHERE key_hash = $1',
-      [keyHash],
-    ).catch(() => [] as ApiKey[]);
+    let rows: ApiKey[] = [];
+    try {
+      rows = await query<ApiKey>(
+        'SELECT id, role, label, expires_at AS "expiresAt" FROM api_keys WHERE key_hash = $1',
+        [keyHash],
+      );
+    } catch {
+      rows = [];
+    }
 
     if (rows.length === 0) {
       logger.info({

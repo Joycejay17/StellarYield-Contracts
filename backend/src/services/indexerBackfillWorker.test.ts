@@ -15,6 +15,6 @@ describe("processIndexerBackfill", () => {
 
     await processIndexerBackfill(10, 20);
 
-    expect(queueBackfillMock).toHaveBeenCalledWith(10, 20);
+    expect(queueBackfillMock).toHaveBeenCalledWith(10, 20, undefined);
   });
 });
