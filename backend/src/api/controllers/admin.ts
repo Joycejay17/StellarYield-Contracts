@@ -1037,6 +1037,40 @@ export async function patchRetentionPolicy(req: Request, res: Response, next: Ne
   }
 }
 
+export async function getJobQueueDashboard(_req: Request, res: Response, next: NextFunction) {
+  try {
+    const rows = await query<{
+      name: string;
+      pending: string;
+      active: string;
+      failed: string;
+      completed24h: string;
+    }>(
+      `SELECT
+         name,
+         COUNT(*) FILTER (WHERE state IN ('created', 'retry'))::text AS pending,
+         COUNT(*) FILTER (WHERE state = 'active')::text AS active,
+         COUNT(*) FILTER (WHERE state = 'failed')::text AS failed,
+         COUNT(*) FILTER (WHERE state = 'completed' AND completed_on >= NOW() - INTERVAL '24 hours')::text AS completed24h
+       FROM pgboss.job
+       GROUP BY name
+       ORDER BY name ASC`,
+    );
+
+    res.json({
+      queues: rows.map((r) => ({
+        name: r.name,
+        pending: parseInt(r.pending, 10),
+        active: parseInt(r.active, 10),
+        failed: parseInt(r.failed, 10),
+        completed24h: parseInt(r.completed24h, 10),
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getJobStatus(req: Request, res: Response, next: NextFunction) {
   try {
     const jobId = req.params["jobId"] as string;
@@ -1047,10 +1081,21 @@ export async function getJobStatus(req: Request, res: Response, next: NextFuncti
       return;
     }
 
+    let progress: number | null = null;
+    if (job.state === "completed") {
+      progress = 100;
+    } else if (job.output && typeof job.output === "object" && "progress" in job.output) {
+      const p = (job.output as Record<string, unknown>)["progress"];
+      if (typeof p === "number") {
+        progress = p;
+      }
+    }
+
     res.json({
       id: job.id,
       name: job.name,
       state: job.state,
+      progress,
       createdAt: job.createdOn,
       completedOn: job.completedOn,
       output: job.output,

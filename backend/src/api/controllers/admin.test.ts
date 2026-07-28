@@ -320,7 +320,7 @@ describe("Admin Controller", () => {
       expect(res.json).toHaveBeenCalledWith({ error: "NotFound", message: "Job not found" });
     });
 
-    it("returns job details when found", async () => {
+    it("returns job details with progress when found", async () => {
       const { jobQueue } = await import("../../services/jobQueue.js");
       const { getJobStatus } = await import("./admin.js");
       (jobQueue.getJob as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -342,9 +342,66 @@ describe("Admin Controller", () => {
         id: "abc-123",
         name: "webhook-deliver",
         state: "completed",
+        progress: 100,
         createdAt: new Date("2025-01-01"),
         completedOn: new Date("2025-01-01"),
         output: { success: true },
+      });
+    });
+
+    it("returns progress value from job output when active (#851)", async () => {
+      const { jobQueue } = await import("../../services/jobQueue.js");
+      const { getJobStatus } = await import("./admin.js");
+      (jobQueue.getJob as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "backfill-1",
+        name: "indexer-backfill",
+        state: "active",
+        createdOn: new Date("2025-01-01"),
+        completedOn: null,
+        output: { progress: 40 },
+      });
+
+      const req = { params: { jobId: "backfill-1" } } as any;
+      const res = { json: vi.fn() } as any;
+      const next = vi.fn();
+
+      await getJobStatus(req, res, next);
+
+      expect(res.json).toHaveBeenCalledWith({
+        id: "backfill-1",
+        name: "indexer-backfill",
+        state: "active",
+        progress: 40,
+        createdAt: new Date("2025-01-01"),
+        completedOn: null,
+        output: { progress: 40 },
+      });
+    });
+  });
+
+  // ── Job queue dashboard endpoint (#853) ───────────────────────────────
+  describe("getJobQueueDashboard", () => {
+    it("returns job queue summary grouped by job name", async () => {
+      const { query } = await import("../../db/index.js");
+      const { getJobQueueDashboard } = await import("./admin.js");
+      const mockQuery = query as ReturnType<typeof vi.fn>;
+
+      mockQuery.mockResolvedValueOnce([
+        { name: "indexer-backfill", pending: "2", active: "1", failed: "0", completed24h: "5" },
+        { name: "webhook-deliver", pending: "0", active: "0", failed: "1", completed24h: "10" },
+      ]);
+
+      const req = {} as any;
+      const res = { json: vi.fn() } as any;
+      const next = vi.fn();
+
+      await getJobQueueDashboard(req, res, next);
+
+      expect(res.json).toHaveBeenCalledWith({
+        queues: [
+          { name: "indexer-backfill", pending: 2, active: 1, failed: 0, completed24h: 5 },
+          { name: "webhook-deliver", pending: 0, active: 0, failed: 1, completed24h: 10 },
+        ],
       });
     });
   });
