@@ -13,7 +13,6 @@ import { adminRouter } from "./api/routes/admin.js";
 import { factoryRouter } from "./api/routes/factory.js";
 import { webhooksRouter } from "./api/routes/webhooks.js";
 import { analyticsRouter } from "./api/routes/analytics.js";
-import { factoryRouter } from "./api/routes/factory.js";
 import { errorHandler } from "./api/middleware/errors.js";
 import { requestId } from "./api/middleware/requestId.js";
 import { internalAuth } from "./api/middleware/internalAuth.js";

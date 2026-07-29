@@ -326,10 +326,17 @@ export class Indexer {
     finishSpan(tickSpan);
   }
 
-  private async backfill(tipLedger: number): Promise<void> {
+  private async backfill(
+    tipLedger: number,
+    startLedger?: number,
+    onProgress?: (progress: number) => Promise<void>,
+  ): Promise<void> {
     const batchSize = config.indexer.batchSize;
     const server = getSorobanRpc();
-    let cursor = this.lastLedger;
+    let cursor = startLedger !== undefined ? startLedger : this.lastLedger;
+    const initialLedger = cursor;
+    const totalRange = Math.max(1, tipLedger - initialLedger);
+    let batchCount = 0;
 
     const contractIds = Array.from(this.watchedContractIds);
     const filters = contractIds.length > 0
@@ -362,6 +369,12 @@ export class Indexer {
         this.lastLedger = cursor;
         await this.persistLastLedger();
         this.lastTickAt = new Date();
+
+        batchCount++;
+        if (onProgress && (batchCount % 10 === 0 || cursor >= tipLedger)) {
+          const pct = Math.min(100, Math.floor(((cursor - initialLedger) / totalRange) * 100));
+          await onProgress(pct);
+        }
       } catch (err) {
         logger.warn({ err, from: cursor + 1, to: batchTo }, "RPC error during backfill batch");
         break;
@@ -1385,7 +1398,11 @@ export class Indexer {
    * Queue a backfill range to be processed on the next indexer tick.
    * For admin-triggered backfills after RPC outages.
    */
-  async queueBackfill(fromLedger: number, toLedger: number): Promise<void> {
+  async queueBackfill(
+    fromLedger: number,
+    toLedger: number,
+    onProgress?: (progress: number) => Promise<void>,
+  ): Promise<void> {
     if (fromLedger >= toLedger) {
       throw new Error("fromLedger must be less than toLedger");
     }
@@ -1394,7 +1411,7 @@ export class Indexer {
     }
 
     logger.info({ fromLedger, toLedger }, "Admin backfill queued");
-    await this.backfill(toLedger);
+    await this.backfill(toLedger, fromLedger, onProgress);
   }
 
   /**

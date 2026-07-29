@@ -16,6 +16,7 @@ import {
   deleteUser,
   getAdminAuditLog,
   getJobStatus,
+  getJobQueueDashboard,
   getFailedJobs,
   flagUserAml,
   clearUserAml,
@@ -66,5 +67,7 @@ adminRouter.get("/compliance/users/:address/summary", getUserComplianceSummary);
 adminRouter.get("/retention-policy", getRetentionPolicy);
 adminRouter.patch("/retention-policy", patchRetentionPolicy);
 
+adminRouter.get("/jobs/dashboard", getJobQueueDashboard);
 adminRouter.get("/jobs/failed", getFailedJobs);
 adminRouter.get("/jobs/:jobId", getJobStatus);
+
