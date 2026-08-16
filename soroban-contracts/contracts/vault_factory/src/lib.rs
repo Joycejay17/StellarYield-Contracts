@@ -168,7 +168,11 @@ impl VaultFactory {
     pub fn create_single_rwa_vault_full(
         e: &Env,
         caller: Address,
-        params: CreateVaultParams,
+        // Declared as the concrete struct, not the `CreateVaultParams` alias:
+        // type aliases are erased from the generated contract spec, which leaves
+        // the CLI unable to resolve the argument type ("Missing Entry
+        // CreateVaultParams") and blocks even deploying the factory.
+        params: BatchVaultParams,
     ) -> Address {
         caller.require_auth();
         require_current_schema(e);
@@ -200,7 +204,11 @@ impl VaultFactory {
     pub fn create_single_rwa_vault_batch(
         e: &Env,
         caller: Address,
-        params: CreateVaultParams,
+        // Declared as the concrete struct, not the `CreateVaultParams` alias:
+        // type aliases are erased from the generated contract spec, which leaves
+        // the CLI unable to resolve the argument type ("Missing Entry
+        // CreateVaultParams") and blocks even deploying the factory.
+        params: BatchVaultParams,
     ) -> Address {
         caller.require_auth();
         require_current_schema(e);
@@ -899,17 +907,19 @@ impl VaultFactory {
         let coop = get_default_cooperator(e);
 
         // Deploy a fresh vault contract instance.
-        // The salt combines a monotonic counter, the vault name, and the
-        // current timestamp to ensure every vault has a unique address and
-        // to prevent collisions even if the registry count decreases.
+        //
+        // The salt combines a monotonic deploy counter with the vault name. The
+        // counter never decreases, so that pair is already unique per vault.
+        //
+        // The ledger timestamp is deliberately NOT part of the salt: it makes
+        // the derived address differ between simulation and execution (they land
+        // in different ledgers), so the footprint computed during preflight never
+        // matches the address actually written, and submission traps with
+        // InvokeHostFunction(Trapped).
         let counter = increment_vault_deploy_counter(e);
         let mut salt_bytes = soroban_sdk::Bytes::new(e);
         salt_bytes.append(&soroban_sdk::Bytes::from_slice(e, &counter.to_be_bytes()));
         salt_bytes.append(&name.clone().to_xdr(e));
-        salt_bytes.append(&soroban_sdk::Bytes::from_slice(
-            e,
-            &e.ledger().timestamp().to_be_bytes(),
-        ));
         let salt = e.crypto().sha256(&salt_bytes);
 
         // Build the InitParams struct for the vault constructor.
@@ -934,6 +944,12 @@ impl VaultFactory {
             rwa_category,
             expected_apy,
             lock_up_period: 0u64,
+            // These three must be present for the vault's `InitParams` to unpack;
+            // omitting them makes every `create_*_vault` call trap with
+            // Error(Object, UnexpectedSize) inside the vault constructor.
+            operator_fee_bps: 0u32,      // no operator cut on distributed yield
+            timelock_delay: 172_800u64,  // 48 hours, matching the vault's own default
+            yield_vesting_period: 0u64,  // yield claimable immediately
         };
 
         let vault_addr = e

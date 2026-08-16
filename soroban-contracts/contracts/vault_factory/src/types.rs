@@ -75,6 +75,12 @@ pub struct SingleRwaVaultInitParams {
     pub expected_apy: u32,
     /// Lock-up period in seconds after deposit (0 = no lock-up).
     pub lock_up_period: u64,
+    /// Operator fee in basis points, charged on distributed yield (max 1_000).
+    pub operator_fee_bps: u32,
+    /// Delay in seconds before a proposed timelock action may execute.
+    pub timelock_delay: u64,
+    /// Period over which claimed yield vests (0 = immediately claimable).
+    pub yield_vesting_period: u64,
 }
 
 /// Parameters for batch vault creation (mirrors BatchVaultParams in Solidity).
