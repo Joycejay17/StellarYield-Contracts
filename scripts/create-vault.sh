@@ -98,8 +98,11 @@ prompt FUNDING_TARGET   "Funding target in stroops (1 USDC = 10000000)" "1000000
 prompt MAX_DEPOSIT      "Per-user deposit cap in stroops (0 = unlimited)" "0"
 prompt EXIT_FEE_BPS     "Early-redemption exit fee in basis points" "100"
 
-# Default epoch duration to 30 days in seconds
-EPOCH_DURATION="${EPOCH_DURATION:-2592000}"
+# Remaining CreateVaultParams fields, defaulted rather than prompted.
+RWA_CATEGORY="${RWA_CATEGORY:-Government Debt}"
+EXPECTED_APY_BPS="${EXPECTED_APY_BPS:-0}"          # basis points; 0 = unset
+MIN_DEPOSIT="${MIN_DEPOSIT:-0}"                    # 0 = no minimum
+FUNDING_DEADLINE="${FUNDING_DEADLINE:-0}"          # 0 = no deadline
 
 echo ""
 info "Factory:        $FACTORY_ADDRESS"
@@ -120,25 +123,35 @@ echo ""
 # Invoke factory
 # ---------------------------------------------------------------------------
 
-info "Invoking create_single_rwa_vault on factory..."
+info "Invoking create_single_rwa_vault_full on factory..."
 
+# `create_single_rwa_vault` takes only 9 args and cannot set a funding target,
+# minimum deposit, or exit fee. The `_full` variant takes the whole
+# CreateVaultParams struct, which is what this script's prompts collect.
 VAULT_ADDRESS=$(stellar contract invoke \
     --id "$FACTORY_ADDRESS" \
     --source-account "$SOURCE_ACCOUNT" \
     --network "$NETWORK" \
-    -- create_single_rwa_vault \
-    --caller        "$OPERATOR_ADDRESS" \
-    --asset         "$ASSET" \
-    --name          "$VAULT_NAME" \
-    --symbol        "$VAULT_SYMBOL" \
-    --rwa_name      "$RWA_NAME" \
-    --rwa_symbol    "$RWA_SYMBOL" \
-    --rwa_document_uri "$RWA_DOCUMENT_URI" \
-    --maturity_date "$MATURITY_DATE" \
-    --funding_target "$FUNDING_TARGET" \
-    --max_deposit_per_user "$MAX_DEPOSIT" \
-    --exit_fee_bps  "$EXIT_FEE_BPS" \
-    --epoch_duration_seconds "$EPOCH_DURATION")
+    -- create_single_rwa_vault_full \
+    --caller "$OPERATOR_ADDRESS" \
+    --params "{
+      \"asset\": \"$ASSET\",
+      \"name\": \"$VAULT_NAME\",
+      \"symbol\": \"$VAULT_SYMBOL\",
+      \"rwa_name\": \"$RWA_NAME\",
+      \"rwa_symbol\": \"$RWA_SYMBOL\",
+      \"rwa_document_uri\": \"$RWA_DOCUMENT_URI\",
+      \"rwa_category\": \"$RWA_CATEGORY\",
+      \"expected_apy\": $EXPECTED_APY_BPS,
+      \"maturity_date\": $MATURITY_DATE,
+      \"funding_deadline\": $FUNDING_DEADLINE,
+      \"funding_target\": \"$FUNDING_TARGET\",
+      \"min_deposit\": \"$MIN_DEPOSIT\",
+      \"max_deposit_per_user\": \"$MAX_DEPOSIT\",
+      \"early_redemption_fee_bps\": $EXIT_FEE_BPS
+    }")
+
+VAULT_ADDRESS=$(echo "$VAULT_ADDRESS" | tr -d '"[:space:]')
 
 [[ -z "$VAULT_ADDRESS" ]] && die "Vault creation failed — no address returned."
 success "Vault deployed at: $VAULT_ADDRESS"
