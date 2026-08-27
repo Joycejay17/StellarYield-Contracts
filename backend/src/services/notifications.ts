@@ -58,6 +58,8 @@ interface WebhookRow {
   events: string[];
   secret: string | null;
   consecutive_failures: number;
+  priority: number;
+  fallback_channel: number | null;
 }
 
 export class NotificationService {
@@ -70,7 +72,10 @@ export class NotificationService {
    */
   async notify(event: string, data: Record<string, unknown>): Promise<void> {
     const webhooks = await query<WebhookRow>(
-      "SELECT id, url, events, secret, consecutive_failures FROM webhooks WHERE active = TRUE AND $1 = ANY(events)",
+      `SELECT id, url, events, secret, consecutive_failures, priority, fallback_channel
+       FROM webhooks
+       WHERE active = TRUE AND $1 = ANY(events)
+       ORDER BY priority ASC, created_at DESC`,
       [event],
     );
 
@@ -78,11 +83,23 @@ export class NotificationService {
 
     const payload = JSON.stringify({ event, data, timestamp: new Date().toISOString() });
 
-    await Promise.allSettled(
-      webhooks.map((webhook) =>
-        jobQueue.send("webhook-deliver", { webhookId: webhook.id, payload }),
-      ),
-    );
+    // Attempt channels in ascending priority order (lower value = higher
+    // priority). Channels that share a priority are dispatched concurrently;
+    // each priority tier is enqueued before the next one starts (#1025).
+    const tiers = new Map<number, WebhookRow[]>();
+    for (const webhook of webhooks) {
+      const tier = tiers.get(webhook.priority) ?? [];
+      tier.push(webhook);
+      tiers.set(webhook.priority, tier);
+    }
+
+    for (const priority of [...tiers.keys()].sort((a, b) => a - b)) {
+      await Promise.allSettled(
+        tiers.get(priority)!.map((webhook) =>
+          jobQueue.send("webhook-deliver", { webhookId: webhook.id, payload }),
+        ),
+      );
+    }
   }
 
   /**
@@ -90,19 +107,27 @@ export class NotificationService {
    */
   async getWebhooks(): Promise<WebhookRow[]> {
     return query<WebhookRow>(
-      "SELECT id, url, events, secret, consecutive_failures FROM webhooks WHERE active = TRUE ORDER BY created_at DESC",
+      `SELECT id, url, events, secret, consecutive_failures, priority, fallback_channel
+       FROM webhooks
+       WHERE active = TRUE
+       ORDER BY priority ASC, created_at DESC`,
     );
   }
 
   /**
    * Register a new webhook. Returns the created webhook row.
    */
-  async createWebhook(url: string, events: string[], secret?: string): Promise<WebhookRow> {
+  async createWebhook(
+    url: string,
+    events: string[],
+    secret?: string,
+    priority = 0,
+  ): Promise<WebhookRow> {
     const rows = await query<WebhookRow>(
-      `INSERT INTO webhooks (url, events, secret)
-       VALUES ($1, $2, $3)
-       RETURNING id, url, events, secret, consecutive_failures`,
-      [url, events, secret ?? null],
+      `INSERT INTO webhooks (url, events, secret, priority)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, url, events, secret, consecutive_failures, priority, fallback_channel`,
+      [url, events, secret ?? null, priority],
     );
     return rows[0];
   }
@@ -143,7 +168,8 @@ export class NotificationService {
     for (const row of dueRows) {
       try {
         const webhookRows = await query<WebhookRow>(
-          "SELECT id, url, events, secret, consecutive_failures FROM webhooks WHERE id = $1",
+          `SELECT id, url, events, secret, consecutive_failures, priority, fallback_channel
+           FROM webhooks WHERE id = $1`,
           [row.webhook_id],
         );
         if (webhookRows.length === 0) continue;
