@@ -62,6 +62,9 @@ interface WebhookRow {
   fallback_channel: number | null;
 }
 
+/** Max delivery attempts before a webhook_deliveries row is considered exhausted. */
+const MAX_DELIVERY_ATTEMPTS = 6;
+
 export class NotificationService {
   /**
    * Dispatch an event notification to all active webhooks subscribed to it.
@@ -154,8 +157,9 @@ export class NotificationService {
       webhook_id: number;
       payload: string;
       attempt: number;
+      fallback_channel: number | null;
     }>(
-      `SELECT wd.id, wd.webhook_id, wd.payload, wd.attempt
+      `SELECT wd.id, wd.webhook_id, wd.payload, wd.attempt, w.fallback_channel
        FROM webhook_deliveries wd
        JOIN webhooks w ON w.id = wd.webhook_id AND w.active = TRUE
        WHERE wd.next_retry_at <= NOW()
@@ -202,6 +206,7 @@ export class NotificationService {
              WHERE id = $4`,
             [nextAttempt, delaySeconds, "non-2xx response", row.id],
           );
+          await this.maybeEscalateToFallback(row, nextAttempt);
         }
       } catch (err) {
         const nextAttempt = row.attempt + 1;
@@ -212,8 +217,32 @@ export class NotificationService {
            WHERE id = $4`,
           [nextAttempt, delaySeconds, String(err), row.id],
         );
+        await this.maybeEscalateToFallback(row, nextAttempt);
       }
     }
+  }
+
+  /**
+   * When a primary webhook has exhausted its retry budget (#219) and defines a
+   * fallback channel, enqueue a single delivery attempt to that fallback
+   * webhook with the original payload (#1024). No-op while retries remain or
+   * when no fallback is configured.
+   */
+  private async maybeEscalateToFallback(
+    row: { id: number; webhook_id: number; payload: string; fallback_channel: number | null },
+    nextAttempt: number,
+  ): Promise<void> {
+    if (nextAttempt < MAX_DELIVERY_ATTEMPTS || row.fallback_channel == null) return;
+
+    logger.warn(
+      { webhookId: row.webhook_id, fallbackChannel: row.fallback_channel, deliveryId: row.id },
+      "Primary webhook exhausted retries; escalating delivery to fallback channel",
+    );
+
+    await jobQueue.send("webhook-deliver", {
+      webhookId: row.fallback_channel,
+      payload: row.payload,
+    });
   }
 
   /**
