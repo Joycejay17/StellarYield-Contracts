@@ -399,6 +399,40 @@ impl VaultFactory {
         })
     }
 
+    /// Preview the shares a deposit of `assets` would mint, for each
+    /// `(vault, assets)` pair, in a single call (issue #1008).
+    ///
+    /// Delegates to each vault's own `preview_deposit` (ERC-4626 semantics —
+    /// rounds down, favors the vault). Skips any address not registered with
+    /// this factory rather than panicking, so a caller can batch-preview
+    /// across a mixed list without one bad address failing the whole call.
+    ///
+    /// # Arguments
+    /// * `requests` - `(vault_address, assets)` pairs to preview
+    ///
+    /// # Returns
+    /// `Vec<Option<i128>>` in the same order as `requests`; `None` for any
+    /// vault not registered with this factory.
+    pub fn bulk_preview_deposit(
+        e: &Env,
+        requests: Vec<(Address, i128)>,
+    ) -> Vec<Option<i128>> {
+        let mut results: Vec<Option<i128>> = Vec::new(e);
+        let preview_symbol = soroban_sdk::Symbol::new(e, "preview_deposit");
+
+        for (vault, assets) in requests.iter() {
+            if get_vault_info(e, &vault).is_none() {
+                results.push_back(None);
+                continue;
+            }
+            let args: Vec<soroban_sdk::Val> = soroban_sdk::vec![e, assets.into()];
+            let shares: i128 = e.invoke_contract(&vault, &preview_symbol, args);
+            results.push_back(Some(shares));
+        }
+
+        results
+    }
+
     pub fn is_registered_vault(e: &Env, vault: Address) -> bool {
         get_vault_info(e, &vault).is_some()
     }
