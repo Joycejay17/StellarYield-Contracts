@@ -4,6 +4,7 @@ import {
   exportUserData,
   getKycBatch,
   getPortfoliosBatch,
+  getPositionsBatch,
   getUser,
   getUserIncomeForecast,
   getUserKyc,
@@ -82,6 +83,11 @@ usersRouter.post(
   "/portfolios/batch",
   validateBody(batchPortfoliosBodySchema),
   getPortfoliosBatch,
+);
+usersRouter.post(
+  "/positions/batch",
+  validateBody(batchPortfoliosBodySchema),
+  getPositionsBatch,
 );
 usersRouter.post(
   "/kyc/batch",
