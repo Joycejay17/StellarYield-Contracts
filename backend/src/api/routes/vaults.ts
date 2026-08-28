@@ -42,6 +42,7 @@ import {
 } from "../controllers/simulate.js";
 import { validateParams, validateQuery, validateBody } from "../middleware/validate.js";
 import { requireApiKey } from "../middleware/auth.js";
+import { simulateLimiter } from "../middleware/rateLimit.js";
 import { parseVaultSort } from "../../services/vault.js";
 
 const contractAddressSchema = z.string().length(56).regex(/^C[A-Z2-7]{55}$/);
@@ -194,6 +195,7 @@ vaultsRouter.get("/stream", streamVaultEvents);
 // Issue #1015: Simulation error translation (placed before /:contractId routes)
 vaultsRouter.post(
   "/simulate/translate-error",
+  simulateLimiter,
   validateBody(z.object({ errorCode: z.number().int() })),
   translateSimulationError,
 );
@@ -201,12 +203,14 @@ vaultsRouter.get("/factory/:factoryId", validateParams(vaultFactoryParamsSchema)
 // Issue #1012: Funding progress simulation
 vaultsRouter.get(
   "/:contractId/simulate/funding",
+  simulateLimiter,
   validateParams(vaultParamsSchema),
   simulateFundingProgress,
 );
 // Issue #1013: Multi-operation simulation
 vaultsRouter.post(
   "/:contractId/simulate",
+  simulateLimiter,
   validateParams(vaultParamsSchema),
   simulateMultiOperation,
 );

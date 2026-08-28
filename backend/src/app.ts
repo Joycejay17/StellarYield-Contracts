@@ -18,7 +18,7 @@ import { errorHandler } from "./api/middleware/errors.js";
 import { requestId } from "./api/middleware/requestId.js";
 import { internalAuth } from "./api/middleware/internalAuth.js";
 import { internalRouter } from "./api/routes/internal.js";
-import { publicLimiter, authLimiter } from "./api/middleware/rateLimit.js";
+import { publicLimiter, authLimiter, simulateLimiter } from "./api/middleware/rateLimit.js";
 import { httpRequestsTotal, getMetrics } from "./services/metrics.js";
 import { setupOpenApiRoutes } from "./services/openapi.js";
 import { schema } from "./graphql/schema.js";
