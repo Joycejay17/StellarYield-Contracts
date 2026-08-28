@@ -76,6 +76,11 @@ const envSchema = z.object({
     .default("300")
     .transform((v) => parseInt(v, 10))
     .pipe(z.number().int().min(1)),
+  RATE_LIMIT_SIMULATE: z
+    .string()
+    .default("30")
+    .transform((v) => parseInt(v, 10))
+    .pipe(z.number().int().min(1)),
   DB_POOL_MIN: z
     .string()
     .default("2")
@@ -146,6 +151,15 @@ const envSchema = z.object({
     .default("10")
     .transform((v) => parseInt(v, 10))
     .pipe(z.number().int().min(1).max(100)),
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z
+    .string()
+    .optional()
+    .transform((v) => (v ? parseInt(v, 10) : null))
+    .pipe(z.number().int().min(1).max(65535).nullable()),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+  SMTP_FROM: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -215,6 +229,7 @@ export const config = {
   rateLimit: {
     public: parsed.data.RATE_LIMIT_PUBLIC,
     auth: parsed.data.RATE_LIMIT_AUTH,
+    simulate: parsed.data.RATE_LIMIT_SIMULATE,
   },
 
   eventsRetentionDays: parsed.data.EVENTS_RETENTION_DAYS,
@@ -235,4 +250,12 @@ export const config = {
   sseReplayBufferSize: parsed.data.SSE_REPLAY_BUFFER,
   dbPoolAlertWaiting: parsed.data.DB_POOL_ALERT_WAITING,
   rpcErrorRateAlertPct: parsed.data.RPC_ERROR_RATE_ALERT_PCT,
+
+  smtp: {
+    host: parsed.data.SMTP_HOST,
+    port: parsed.data.SMTP_PORT,
+    user: parsed.data.SMTP_USER,
+    pass: parsed.data.SMTP_PASS,
+    from: parsed.data.SMTP_FROM,
+  },
 } as const;

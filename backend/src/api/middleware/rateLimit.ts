@@ -16,3 +16,14 @@ export const authLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: "TooManyRequests", message: "Rate limit exceeded" },
 });
+
+export const simulateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: config.rateLimit.simulate,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    res.set("Retry-After", "60");
+    res.status(429).json({ error: "TooManyRequests", message: "Rate limit exceeded" });
+  },
+});
