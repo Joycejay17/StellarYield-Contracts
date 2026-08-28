@@ -293,6 +293,20 @@ export async function getPortfoliosBatch(
   }
 }
 
+export async function getPositionsBatch(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const { addresses } = req.body as { addresses: string[] };
+    const positions = await userService.getPortfoliosBatch(addresses);
+    res.json(positions);
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getUserKyc(req: Request, res: Response, next: NextFunction) {
   try {
     const verified = await readKycVerified(
@@ -339,6 +353,27 @@ export async function getUserYieldSummary(
   try {
     const summary = await userService.getUserYieldSummary(String(req.params["address"]));
     res.json(summary);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getUserYieldBreakdown(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const address = String(req.params["address"]);
+    const vaultId = String(req.query["vaultId"]);
+
+    const breakdown = await userService.getUserYieldBreakdown(address, vaultId);
+    if (!breakdown) {
+      res.status(404).json({ error: "NotFound", message: "User position not found for vault" });
+      return;
+    }
+
+    res.json(breakdown);
   } catch (err) {
     next(err);
   }

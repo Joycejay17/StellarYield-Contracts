@@ -493,19 +493,69 @@ function registerPaths(): void {
     path: "/api/v1/webhooks",
     summary: "Create webhook (requires API key)",
     tags: ["Webhooks"],
-    request: { body: { content: { "application/json": { schema: z.object({ url: z.string(), events: z.array(z.string()), secret: z.string().optional() }) } } } },
+    request: { body: { content: { "application/json": { schema: z.object({ url: z.string(), events: z.array(z.string()), secret: z.string().optional(), priority: z.number().int().optional() }) } } } },
     responses: {
-      201: { description: "Webhook created", content: { "application/json": { schema: z.object({ id: z.number(), url: z.string(), events: z.array(z.string()), active: z.boolean(), createdAt: z.string() }) } } },
+      201: { description: "Webhook created", content: { "application/json": { schema: z.object({ id: z.number(), url: z.string(), events: z.array(z.string()), active: z.boolean(), createdAt: z.string(), priority: z.number(), fallbackChannel: z.number().nullable() }) } } },
     },
   });
 
   registry.registerPath({
     method: "get",
     path: "/api/v1/webhooks",
-    summary: "List webhooks (requires API key)",
+    summary: "List webhooks (requires API key), ordered by priority ascending",
     tags: ["Webhooks"],
     responses: {
-      200: { description: "List of webhooks", content: { "application/json": { schema: z.array(z.object({ id: z.number(), url: z.string(), events: z.array(z.string()), active: z.boolean(), createdAt: z.string() })) } } },
+      200: { description: "List of webhooks", content: { "application/json": { schema: z.array(z.object({ id: z.number(), url: z.string(), events: z.array(z.string()), active: z.boolean(), createdAt: z.string(), priority: z.number(), fallbackChannel: z.number().nullable() })) } } },
+    },
+  });
+
+  registry.registerPath({
+    method: "get",
+    path: "/api/v1/admin/notifications/health",
+    summary: "Ping each active webhook channel (requires API key)",
+    tags: ["Webhooks"],
+    responses: {
+      200: {
+        description: "Per-channel reachability",
+        content: {
+          "application/json": {
+            schema: z.object({
+              channels: z.array(
+                z.object({
+                  id: z.number(),
+                  url: z.string(),
+                  reachable: z.boolean(),
+                  latencyMs: z.number().nullable(),
+                }),
+              ),
+            }),
+          },
+        },
+      },
+    },
+  });
+
+  registry.registerPath({
+    method: "post",
+    path: "/api/v1/admin/notifications/preview",
+    summary: "Render a notification template against a sample payload (requires admin API key)",
+    tags: ["Webhooks"],
+    request: {
+      body: {
+        content: {
+          "application/json": {
+            schema: z.object({
+              eventType: z.string(),
+              channel: z.string(),
+              samplePayload: z.record(z.unknown()),
+            }),
+          },
+        },
+      },
+    },
+    responses: {
+      200: { description: "Rendered message body", content: { "application/json": { schema: z.object({ rendered: z.string() }) } } },
+      404: { description: "No template for the (eventType, channel) pair", content: { "application/json": { schema: errorResponseSchema } } },
     },
   });
 

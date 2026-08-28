@@ -145,6 +145,71 @@ export class UserService {
   }
 
   /**
+   * Per-vault yield breakdown for a user, including an annualized yield rate
+   * for partial-year positions (#984).
+   */
+  async getUserYieldBreakdown(
+    address: string,
+    vaultContractId: string,
+  ): Promise<{
+    vaultId: string;
+    deposited: string;
+    realizedYield: string;
+    daysSinceDeposit: number;
+    annualizedYield: number | null;
+  } | null> {
+    const posRows = await query<{ contract_id: string; deposited: string }>(
+      `SELECT v.contract_id, uvp.deposited
+       FROM user_vault_positions uvp
+       JOIN vaults v ON uvp.vault_id = v.id
+       WHERE uvp.user_address = $1 AND v.contract_id = $2
+       LIMIT 1`,
+      [address, vaultContractId],
+    );
+    if (posRows.length === 0) return null;
+
+    const deposited = BigInt(posRows[0].deposited || "0");
+
+    const claimedRows = await query<{ total: string }>(
+      `SELECT COALESCE(SUM((payload->>'amount')::numeric), 0)::text AS total
+       FROM indexed_events
+       WHERE event_type IN ('yield_claimed', 'yield_claimed_partial')
+         AND contract_id = $2
+         AND (payload->>'user' = $1 OR payload->>'address' = $1)`,
+      [address, vaultContractId],
+    );
+    const realizedYield = BigInt(claimedRows[0]?.total ?? "0");
+
+    // `daysSinceDeposit` is measured from the user's first recorded share
+    // position in the vault (i.e. their first deposit epoch).
+    const snapRows = await query<{ first_at: Date | null }>(
+      `SELECT MIN(sbs.recorded_at) AS first_at
+       FROM share_balance_snapshots sbs
+       JOIN vaults v ON sbs.vault_id = v.id
+       WHERE sbs.user_address = $1 AND v.contract_id = $2`,
+      [address, vaultContractId],
+    );
+    const firstAt = snapRows[0]?.first_at ?? null;
+    const daysSinceDeposit = firstAt
+      ? Math.floor((Date.now() - firstAt.getTime()) / (24 * 60 * 60 * 1000))
+      : 0;
+
+    let annualizedYield: number | null = null;
+    if (deposited > 0n && daysSinceDeposit > 0) {
+      annualizedYield =
+        (Number(realizedYield) / Number(deposited)) * (365 / daysSinceDeposit);
+    }
+
+    return {
+      vaultId: vaultContractId,
+      deposited: deposited.toString(),
+      realizedYield: realizedYield.toString(),
+      daysSinceDeposit,
+      annualizedYield,
+    };
+  }
+
+  /**
    * Fetch a user's full portfolio: all vault positions, total deposited,
    * total pending yield, and combined total value.
    */

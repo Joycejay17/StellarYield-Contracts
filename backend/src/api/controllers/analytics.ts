@@ -1,7 +1,10 @@
 import type { Request, Response, NextFunction } from "express";
 import { query } from "../../db/index.js";
 import { cacheGet, cacheSet } from "../../cache/redis.js";
+import { YieldService } from "../../services/yield.js";
 import type { AnalyticsSummary, TvlAggregate } from "../../types/index.js";
+
+const yieldService = new YieldService();
 
 const ANALYTICS_CACHE_TTL = 60;
 const TVL_CACHE_CONTROL = "max-age=30";
@@ -75,6 +78,36 @@ export async function getTvlAggregate(_req: Request, res: Response, next: NextFu
 
     res.set("Cache-Control", TVL_CACHE_CONTROL);
     res.json(tvl);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── Cross-vault yield correlation (#987) ───────────────────────────────────────
+export async function getYieldCorrelation(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const vaultA = String(req.query["vaultA"]);
+    const vaultB = String(req.query["vaultB"]);
+
+    if (!vaultA || !vaultB) {
+      res.status(400).json({
+        error: "BadRequest",
+        message: "Both vaultA and vaultB query parameters are required",
+      });
+      return;
+    }
+
+    const result = await yieldService.getYieldCorrelation(vaultA, vaultB);
+    if (!result) {
+      res.status(404).json({ error: "NotFound", message: "Vault not found" });
+      return;
+    }
+
+    res.json(result);
   } catch (err) {
     next(err);
   }
