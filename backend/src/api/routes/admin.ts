@@ -8,6 +8,7 @@ import {
   deleteApiKey,
   getApiKeys,
   getWebhookDeliveries,
+  bulkToggleWebhooks,
   getArchivedVaults,
   getTotalSupplyConsistency,
   getDbStats,
@@ -47,6 +48,8 @@ adminRouter.get("/consistency/total-supply", getTotalSupplyConsistency);
 adminRouter.get("/api-keys", getApiKeys);
 adminRouter.delete("/api-keys/:id", requireApiKey({ role: "admin" }), deleteApiKey);
 adminRouter.get("/webhooks/:id/deliveries", getWebhookDeliveries);
+// Issue #1006: bulk webhook enable/disable
+adminRouter.post("/webhooks/bulk/toggle", requireApiKey({ role: "admin" }), bulkToggleWebhooks);
 adminRouter.get("/db/stats", getDbStats);
 adminRouter.get("/fees", getAdminFees);
 adminRouter.get("/fees/dashboard", requireApiKey({ role: "admin" }), getAdminFeesDashboard);
