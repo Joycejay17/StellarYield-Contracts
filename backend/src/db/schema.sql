@@ -90,7 +90,9 @@ CREATE TABLE IF NOT EXISTS webhooks (
   events          TEXT[] NOT NULL,
   secret          TEXT,
   active          BOOLEAN DEFAULT TRUE,
-  created_at      TIMESTAMPTZ DEFAULT NOW()
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  channel         TEXT DEFAULT 'webhook',
+  consecutive_failures INT DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS api_keys (

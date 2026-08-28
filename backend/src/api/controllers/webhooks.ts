@@ -11,6 +11,7 @@ interface WebhookRow {
   active: boolean;
   created_at: Date;
   consecutive_failures: number;
+  channel: string | null;
 }
 
 function formatWebhook(w: WebhookRow) {
@@ -21,25 +22,28 @@ function formatWebhook(w: WebhookRow) {
     active: w.active,
     createdAt: w.created_at,
     consecutiveFailures: w.consecutive_failures ?? 0,
+    channel: w.channel ?? "webhook",
   };
 }
 
 export async function createWebhook(req: Request, res: Response, next: NextFunction) {
   try {
-    const { url, events, secret } = req.body as { url: string; events: string[]; secret?: string };
+    const { url, events, secret, channel } = req.body as { url: string; events: string[]; secret?: string; channel?: string };
 
-    try {
-      await validateWebhookUrl(url);
-    } catch (err: any) {
-      res.status(400).json({ error: "InvalidWebhookUrl", message: err.message });
-      return;
+    if (channel !== "email") {
+      try {
+        await validateWebhookUrl(url);
+      } catch (err: any) {
+        res.status(400).json({ error: "InvalidWebhookUrl", message: err.message });
+        return;
+      }
     }
 
     const rows = await query<WebhookRow>(
-      `INSERT INTO webhooks (url, events, secret)
-       VALUES ($1, $2, $3)
-       RETURNING id, url, events, active, created_at, consecutive_failures`,
-      [url, events, secret ?? null],
+      `INSERT INTO webhooks (url, events, secret, channel)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, url, events, active, created_at, consecutive_failures, channel`,
+      [url, events, secret ?? null, channel ?? "webhook"],
     );
 
     res.status(201).json(formatWebhook(rows[0]));
@@ -51,7 +55,7 @@ export async function createWebhook(req: Request, res: Response, next: NextFunct
 export async function listWebhooks(_req: Request, res: Response, next: NextFunction) {
   try {
     const rows = await query<WebhookRow>(
-      "SELECT id, url, events, active, created_at, consecutive_failures FROM webhooks WHERE active = TRUE ORDER BY created_at DESC",
+      "SELECT id, url, events, active, created_at, consecutive_failures, channel FROM webhooks WHERE active = TRUE ORDER BY created_at DESC",
     );
 
     res.json(rows.map(formatWebhook));
@@ -94,7 +98,7 @@ export async function testWebhook(req: Request, res: Response, next: NextFunctio
     }
 
     const rows = await query<WebhookRow>(
-      "SELECT id, url, events, active, created_at, consecutive_failures, secret FROM webhooks WHERE id = $1",
+      "SELECT id, url, events, active, created_at, consecutive_failures, secret, channel FROM webhooks WHERE id = $1",
       [id],
     );
 

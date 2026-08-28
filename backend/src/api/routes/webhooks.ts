@@ -28,15 +28,19 @@ const KNOWN_EVENTS = [
   "vault.funded",
 ] as const;
 
+const KNOWN_CHANNELS = ["webhook", "email", "slack"] as const;
+
 const createWebhookSchema = z.object({
   url: z
     .string()
     .url()
-    .refine((v) => v.startsWith("https://"), { message: "Webhook URL must use HTTPS" }),
+    .refine((v) => v.startsWith("https://"), { message: "Webhook URL must use HTTPS" })
+    .or(z.string().email("Must be a valid email address for email channel")),
   events: z
     .array(z.enum(KNOWN_EVENTS))
     .min(1, "At least one event must be specified"),
   secret: z.string().optional(),
+  channel: z.enum(KNOWN_CHANNELS).default("webhook"),
 });
 
 const webhookParamsSchema = z.object({

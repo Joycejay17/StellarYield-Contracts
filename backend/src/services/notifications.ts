@@ -4,6 +4,7 @@ import { query } from "../db/index.js";
 import { logger } from "../logger.js";
 import { sseService } from "./sse.js";
 import { jobQueue } from "./jobQueue.js";
+import { sendEmail } from "./email.js";
 
 const BLOCKED_HOSTNAMES = new Set([
   "localhost",
@@ -58,6 +59,7 @@ interface WebhookRow {
   events: string[];
   secret: string | null;
   consecutive_failures: number;
+  channel: string | null;
 }
 
 export class NotificationService {
@@ -70,19 +72,78 @@ export class NotificationService {
    */
   async notify(event: string, data: Record<string, unknown>): Promise<void> {
     const webhooks = await query<WebhookRow>(
-      "SELECT id, url, events, secret, consecutive_failures FROM webhooks WHERE active = TRUE AND $1 = ANY(events)",
+      "SELECT id, url, events, secret, consecutive_failures, channel FROM webhooks WHERE active = TRUE AND $1 = ANY(events)",
       [event],
     );
 
     if (webhooks.length === 0) return;
 
-    const payload = JSON.stringify({ event, data, timestamp: new Date().toISOString() });
+    for (const webhook of webhooks) {
+      if (webhook.channel === "email") {
+        await this.sendEmailNotification(event, data, webhook.url);
+      } else if (webhook.channel === "slack") {
+        const payload = this.formatSlackPayload(event, data);
+        await jobQueue.send("webhook-deliver", { webhookId: webhook.id, payload });
+      } else {
+        const payload = JSON.stringify({ event, data, timestamp: new Date().toISOString() });
+        await jobQueue.send("webhook-deliver", { webhookId: webhook.id, payload });
+      }
+    }
+  }
 
-    await Promise.allSettled(
-      webhooks.map((webhook) =>
-        jobQueue.send("webhook-deliver", { webhookId: webhook.id, payload }),
-      ),
-    );
+  private formatSlackPayload(event: string, data: Record<string, unknown>): string {
+    const vaultName = (data.vaultName as string) || "Unknown Vault";
+    const keyData = Object.entries(data)
+      .filter(([key]) => key !== "vaultName")
+      .map(([key, value]) => `*${key}*: ${value}`)
+      .join("\n");
+
+    const slackPayload = {
+      blocks: [
+        {
+          type: "header",
+          text: {
+            type: "plain_text",
+            text: `StellarYield Event: ${event}`,
+          },
+        },
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `*Vault*: ${vaultName}\n*Event Type*: ${event}\n\n${keyData}`,
+          },
+        },
+      ],
+    };
+
+    return JSON.stringify(slackPayload);
+  }
+
+  private async sendEmailNotification(event: string, data: Record<string, unknown>, email: string): Promise<void> {
+    const vaultName = (data.vaultName as string) || "Unknown Vault";
+    const keyData = Object.entries(data)
+      .filter(([key]) => key !== "vaultName")
+      .map(([key, value]) => `<strong>${key}:</strong> ${value}`)
+      .join("<br>");
+
+    const html = `
+      <h2>StellarYield Event: ${event}</h2>
+      <p><strong>Vault:</strong> ${vaultName}</p>
+      <p><strong>Event Type:</strong> ${event}</p>
+      <hr>
+      <p>${keyData}</p>
+    `;
+
+    try {
+      await sendEmail({
+        to: email,
+        subject: `StellarYield Event: ${event}`,
+        html,
+      });
+    } catch (err) {
+      logger.error({ email, event, err }, "Failed to send email notification");
+    }
   }
 
   /**
@@ -90,7 +151,7 @@ export class NotificationService {
    */
   async getWebhooks(): Promise<WebhookRow[]> {
     return query<WebhookRow>(
-      "SELECT id, url, events, secret, consecutive_failures FROM webhooks WHERE active = TRUE ORDER BY created_at DESC",
+      "SELECT id, url, events, secret, consecutive_failures, channel FROM webhooks WHERE active = TRUE ORDER BY created_at DESC",
     );
   }
 
@@ -143,7 +204,7 @@ export class NotificationService {
     for (const row of dueRows) {
       try {
         const webhookRows = await query<WebhookRow>(
-          "SELECT id, url, events, secret, consecutive_failures FROM webhooks WHERE id = $1",
+          "SELECT id, url, events, secret, consecutive_failures, channel FROM webhooks WHERE id = $1",
           [row.webhook_id],
         );
         if (webhookRows.length === 0) continue;
