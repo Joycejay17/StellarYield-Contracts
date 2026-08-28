@@ -30,11 +30,19 @@ export async function createWebhook(req: Request, res: Response, next: NextFunct
   try {
     const { url, events, secret, channel } = req.body as { url: string; events: string[]; secret?: string; channel?: string };
 
-    if (channel !== "email") {
+    const webhookChannel = channel ?? "webhook";
+
+    if (webhookChannel === "webhook" || webhookChannel === "slack") {
       try {
         await validateWebhookUrl(url);
       } catch (err: any) {
         res.status(400).json({ error: "InvalidWebhookUrl", message: err.message });
+        return;
+      }
+    } else if (webhookChannel === "email") {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(url)) {
+        res.status(400).json({ error: "InvalidEmail", message: "Must be a valid email address" });
         return;
       }
     }
@@ -43,7 +51,7 @@ export async function createWebhook(req: Request, res: Response, next: NextFunct
       `INSERT INTO webhooks (url, events, secret, channel)
        VALUES ($1, $2, $3, $4)
        RETURNING id, url, events, active, created_at, consecutive_failures, channel`,
-      [url, events, secret ?? null, channel ?? "webhook"],
+      [url, events, secret ?? null, webhookChannel],
     );
 
     res.status(201).json(formatWebhook(rows[0]));

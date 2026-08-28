@@ -91,9 +91,9 @@ export class NotificationService {
   }
 
   private formatSlackPayload(event: string, data: Record<string, unknown>): string {
-    const vaultName = (data.vaultName as string) || "Unknown Vault";
+    const vaultName = (data.vaultName as string) || (data.name as string) || "Unknown Vault";
     const keyData = Object.entries(data)
-      .filter(([key]) => key !== "vaultName")
+      .filter(([key]) => key !== "vaultName" && key !== "name")
       .map(([key, value]) => `*${key}*: ${value}`)
       .join("\n");
 
@@ -120,9 +120,9 @@ export class NotificationService {
   }
 
   private async sendEmailNotification(event: string, data: Record<string, unknown>, email: string): Promise<void> {
-    const vaultName = (data.vaultName as string) || "Unknown Vault";
+    const vaultName = (data.vaultName as string) || (data.name as string) || "Unknown Vault";
     const keyData = Object.entries(data)
-      .filter(([key]) => key !== "vaultName")
+      .filter(([key]) => key !== "vaultName" && key !== "name")
       .map(([key, value]) => `<strong>${key}:</strong> ${value}`)
       .join("<br>");
 

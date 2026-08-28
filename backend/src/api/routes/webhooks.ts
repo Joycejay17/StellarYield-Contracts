@@ -31,11 +31,7 @@ const KNOWN_EVENTS = [
 const KNOWN_CHANNELS = ["webhook", "email", "slack"] as const;
 
 const createWebhookSchema = z.object({
-  url: z
-    .string()
-    .url()
-    .refine((v) => v.startsWith("https://"), { message: "Webhook URL must use HTTPS" })
-    .or(z.string().email("Must be a valid email address for email channel")),
+  url: z.string().min(1, "URL or email is required"),
   events: z
     .array(z.enum(KNOWN_EVENTS))
     .min(1, "At least one event must be specified"),
