@@ -35,7 +35,12 @@ import {
   getCooperatorFees,
   streamVaultEvents,
 } from "../controllers/vaults.js";
-import { validateParams, validateQuery } from "../middleware/validate.js";
+import {
+  translateSimulationError,
+  simulateFundingProgress,
+  simulateMultiOperation,
+} from "../controllers/simulate.js";
+import { validateParams, validateQuery, validateBody } from "../middleware/validate.js";
 import { requireApiKey } from "../middleware/auth.js";
 import { parseVaultSort } from "../../services/vault.js";
 
@@ -186,7 +191,25 @@ vaultsRouter.get("/new", validateQuery(newVaultsQuerySchema), getNewVaults);
 vaultsRouter.get("/maturing-soon", validateQuery(maturingSoonQuerySchema), getMaturingSoonVaults);
 vaultsRouter.get("/fully-funded", getFullyFundedVaults);
 vaultsRouter.get("/stream", streamVaultEvents);
+// Issue #1015: Simulation error translation (placed before /:contractId routes)
+vaultsRouter.post(
+  "/simulate/translate-error",
+  validateBody(z.object({ errorCode: z.number().int() })),
+  translateSimulationError,
+);
 vaultsRouter.get("/factory/:factoryId", validateParams(vaultFactoryParamsSchema), listVaultsByFactory);
+// Issue #1012: Funding progress simulation
+vaultsRouter.get(
+  "/:contractId/simulate/funding",
+  validateParams(vaultParamsSchema),
+  simulateFundingProgress,
+);
+// Issue #1013: Multi-operation simulation
+vaultsRouter.post(
+  "/:contractId/simulate",
+  validateParams(vaultParamsSchema),
+  simulateMultiOperation,
+);
 vaultsRouter.get("/:contractId", validateParams(vaultParamsSchema), validateQuery(vaultDetailQuerySchema), getVault);
 vaultsRouter.get("/:contractId/state/live", validateParams(vaultParamsSchema), getVaultLiveState);
 vaultsRouter.get("/:contractId/total-assets/live", validateParams(vaultParamsSchema), getVaultLiveTotalAssets);
