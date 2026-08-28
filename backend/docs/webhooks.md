@@ -184,6 +184,66 @@ def webhook():
     return {'received': True}, 200
 ```
 
+## Channel Priority Ordering
+
+Each webhook has an integer `priority` (default `0`; **lower value = higher priority**).
+When an event fires, `NotificationService` dispatches to every subscribed webhook, but
+attempts them in ascending priority order. Webhooks that share a priority value are
+dispatched concurrently; each priority tier is enqueued before the next tier starts.
+
+Set the priority when registering a webhook:
+
+```json
+POST /api/v1/webhooks
+{
+  "url": "https://example.com/primary",
+  "events": ["deposit"],
+  "priority": -10
+}
+```
+
+`GET /api/v1/webhooks` returns `priority` (and `fallbackChannel`) on every row, and lists
+webhooks in priority order.
+
+## Failure Escalation
+
+A webhook may reference another webhook row via `fallback_channel`. After the primary
+webhook exhausts its retry budget (6 attempts), a single delivery attempt of the same
+payload is enqueued to the fallback webhook. The fallback is never used when the primary
+delivers successfully.
+
+## Admin Endpoints
+
+### `GET /api/v1/admin/notifications/health`
+
+Sends an HTTP `HEAD` request (3s timeout) to every active webhook URL and reports
+reachability:
+
+```json
+{
+  "channels": [
+    { "id": 1, "url": "https://example.com/hook", "reachable": true, "latencyMs": 84 },
+    { "id": 2, "url": "https://down.example.com/hook", "reachable": false, "latencyMs": null }
+  ]
+}
+```
+
+### `POST /api/v1/admin/notifications/preview`
+
+Renders a notification template for an `(eventType, channel)` pair against a sample
+payload, without sending anything. Requires an `admin` API key.
+
+```json
+POST /api/v1/admin/notifications/preview
+{ "eventType": "deposit", "channel": "webhook", "samplePayload": { "data": { "amount": "100" } } }
+
+→ 200 { "rendered": "Deposit of 100 into vault ." }
+→ 404 { "error": "TemplateNotFound", ... }   // no template for the pair
+```
+
+Templates live in the `notification_templates` table and use `{{dotted.path}}`
+placeholders resolved against the payload.
+
 ## Best Practices
 
 - Always verify the signature before processing webhook events

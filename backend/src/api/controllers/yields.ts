@@ -271,3 +271,41 @@ export async function getYieldPerShareHistory(
     next(err);
   }
 }
+
+// ── APY vs target (#985) ──────────────────────────────────────────────────────
+export async function getApyVsTarget(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const contractId = String(req.params["contractId"]);
+    const result = await yieldService.getApyVsTarget(contractId);
+    if (!result) {
+      res.status(404).json({ error: "NotFound", message: "Vault not found" });
+      return;
+    }
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── APY trend indicator (#986) ────────────────────────────────────────────────
+export async function getApyTrend(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const contractId = String(req.params["contractId"]);
+    const result = await yieldService.getApyTrend(contractId);
+    if (!result) {
+      res.status(404).json({ error: "NotFound", message: "Vault not found" });
+      return;
+    }
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+}

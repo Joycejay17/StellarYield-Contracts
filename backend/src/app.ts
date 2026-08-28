@@ -12,8 +12,8 @@ import { yieldsRouter } from "./api/routes/yields.js";
 import { adminRouter } from "./api/routes/admin.js";
 import { factoryRouter } from "./api/routes/factory.js";
 import { webhooksRouter } from "./api/routes/webhooks.js";
+import { notificationsRouter } from "./api/routes/notifications.js";
 import { analyticsRouter } from "./api/routes/analytics.js";
-import { simulateRouter } from "./api/routes/simulate.js";
 import { errorHandler } from "./api/middleware/errors.js";
 import { requestId } from "./api/middleware/requestId.js";
 import { internalAuth } from "./api/middleware/internalAuth.js";
@@ -56,10 +56,10 @@ export function createApp(): Express {
   app.use("/api/v1/yields", publicLimiter, yieldsRouter);
   app.use("/api/v1/analytics", publicLimiter, analyticsRouter);
   app.use("/api/v1/factory", publicLimiter, factoryRouter);
+  app.use("/api/v1/admin/notifications", authLimiter, notificationsRouter);
   app.use("/api/v1/admin", authLimiter, adminRouter);
   app.use("/api/v1/factory", publicLimiter, factoryRouter);
   app.use("/api/v1/webhooks", authLimiter, webhooksRouter);
-  app.use("/api/v1/simulate", simulateRouter);
   app.use("/internal", authLimiter, internalAuth, internalRouter);
   // SDL export for client codegen tools (e.g. graphql-codegen); cached since the
   // schema only changes on server restart (#773). Registered before the Apollo

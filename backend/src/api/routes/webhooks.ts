@@ -37,6 +37,8 @@ const createWebhookSchema = z.object({
     .min(1, "At least one event must be specified"),
   secret: z.string().optional(),
   channel: z.enum(KNOWN_CHANNELS).default("webhook"),
+  // Lower value = higher priority; the order channels are attempted in (#1025).
+  priority: z.number().int().optional(),
 });
 
 const webhookParamsSchema = z.object({

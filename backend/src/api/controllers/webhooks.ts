@@ -12,6 +12,8 @@ interface WebhookRow {
   created_at: Date;
   consecutive_failures: number;
   channel: string | null;
+  priority: number;
+  fallback_channel: number | null;
 }
 
 function formatWebhook(w: WebhookRow) {
@@ -23,12 +25,20 @@ function formatWebhook(w: WebhookRow) {
     createdAt: w.created_at,
     consecutiveFailures: w.consecutive_failures ?? 0,
     channel: w.channel ?? "webhook",
+    priority: w.priority ?? 0,
+    fallbackChannel: w.fallback_channel ?? null,
   };
 }
 
 export async function createWebhook(req: Request, res: Response, next: NextFunction) {
   try {
-    const { url, events, secret, channel } = req.body as { url: string; events: string[]; secret?: string; channel?: string };
+    const { url, events, secret, channel, priority } = req.body as {
+      url: string;
+      events: string[];
+      secret?: string;
+      channel?: string;
+      priority?: number;
+    };
 
     const webhookChannel = channel ?? "webhook";
 
@@ -48,10 +58,10 @@ export async function createWebhook(req: Request, res: Response, next: NextFunct
     }
 
     const rows = await query<WebhookRow>(
-      `INSERT INTO webhooks (url, events, secret, channel)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, url, events, active, created_at, consecutive_failures, channel`,
-      [url, events, secret ?? null, webhookChannel],
+      `INSERT INTO webhooks (url, events, secret, channel, priority)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, url, events, active, created_at, consecutive_failures, channel, priority, fallback_channel`,
+      [url, events, secret ?? null, webhookChannel, priority ?? 0],
     );
 
     res.status(201).json(formatWebhook(rows[0]));
@@ -63,7 +73,10 @@ export async function createWebhook(req: Request, res: Response, next: NextFunct
 export async function listWebhooks(_req: Request, res: Response, next: NextFunction) {
   try {
     const rows = await query<WebhookRow>(
-      "SELECT id, url, events, active, created_at, consecutive_failures, channel FROM webhooks WHERE active = TRUE ORDER BY created_at DESC",
+      `SELECT id, url, events, active, created_at, consecutive_failures, channel, priority, fallback_channel
+       FROM webhooks
+       WHERE active = TRUE
+       ORDER BY priority ASC, created_at DESC`,
     );
 
     res.json(rows.map(formatWebhook));

@@ -92,7 +92,9 @@ CREATE TABLE IF NOT EXISTS webhooks (
   active          BOOLEAN DEFAULT TRUE,
   created_at      TIMESTAMPTZ DEFAULT NOW(),
   channel         TEXT DEFAULT 'webhook',
-  consecutive_failures INT DEFAULT 0
+  consecutive_failures INT DEFAULT 0,
+  priority        INT DEFAULT 0,
+  fallback_channel INT
 );
 
 CREATE TABLE IF NOT EXISTS api_keys (
