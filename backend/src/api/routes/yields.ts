@@ -10,6 +10,8 @@ import {
   getYieldTimeline,
   compareEpochs,
   getNextEpochProjection,
+  getApyVsTarget,
+  getApyTrend,
 } from "../controllers/yields.js";
 import { getYieldsStream } from "../controllers/yields-stream.js";
 import { validateQuery, validateParams } from "../middleware/validate.js";
@@ -75,6 +77,12 @@ yieldsRouter.get("/:contractId/epochs/compare", validateQuery(epochCompareQueryS
 
 // ── Next epoch projection (#821) ─────────────────────────────────────────────
 yieldsRouter.get("/:contractId/next-epoch-projection", getNextEpochProjection);
+
+// ── APY vs target (#985) ──────────────────────────────────────────────────────
+yieldsRouter.get("/:contractId/apy/vs-target", getApyVsTarget);
+
+// ── APY trend indicator (#986) ────────────────────────────────────────────────
+yieldsRouter.get("/:contractId/apy/trend", getApyTrend);
 
 yieldsRouter.get("/:contractId/yield-per-share-history", validateQuery(yieldHistoryQuerySchema), getYieldPerShareHistory);
 yieldsRouter.get("/:contractId/pending/:userAddress", getUserPendingYield);
