@@ -42,22 +42,24 @@ export async function simulateDeposit(req: Request, res: Response, next: NextFun
       ? (amountBigInt * totalSupply) / totalAssets
       : amountBigInt;
 
+    const operationResult = {
+      shares: shares.toString(),
+      currentBalance: currentBalance.toString(),
+      totalSupply: totalSupply.toString(),
+      totalAssets: totalAssets.toString(),
+    };
+
     const result: SimulationResult = {
       contractId,
       operation: "deposit",
       params: { amount, userAddress },
-      result: {
-        shares: shares.toString(),
-        currentBalance: currentBalance.toString(),
-        totalSupply: totalSupply.toString(),
-        totalAssets: totalAssets.toString(),
-      },
+      result: operationResult,
       durationMs: Date.now() - startTime,
       fromCache: false,
     };
 
     await logSimulation(result);
-    res.json(result.result);
+    res.json(operationResult);
   } catch (err) {
     next(err);
   }
@@ -78,22 +80,24 @@ export async function simulateWithdraw(req: Request, res: Response, next: NextFu
       ? (sharesBigInt * totalAssets) / totalSupply
       : 0n;
 
+    const operationResult = {
+      amount: amount.toString(),
+      currentBalance: currentBalance.toString(),
+      totalSupply: totalSupply.toString(),
+      totalAssets: totalAssets.toString(),
+    };
+
     const result: SimulationResult = {
       contractId,
       operation: "withdraw",
       params: { shares, userAddress },
-      result: {
-        amount: amount.toString(),
-        currentBalance: currentBalance.toString(),
-        totalSupply: totalSupply.toString(),
-        totalAssets: totalAssets.toString(),
-      },
+      result: operationResult,
       durationMs: Date.now() - startTime,
       fromCache: false,
     };
 
     await logSimulation(result);
-    res.json(result.result);
+    res.json(operationResult);
   } catch (err) {
     next(err);
   }
@@ -109,21 +113,23 @@ export async function simulateYieldClaim(req: Request, res: Response, next: Next
     const totalSupply = await readTotalSupply(contractId);
     const totalAssets = await readTotalAssets(contractId);
 
+    const operationResult = {
+      currentBalance: currentBalance.toString(),
+      totalSupply: totalSupply.toString(),
+      totalAssets: totalAssets.toString(),
+    };
+
     const result: SimulationResult = {
       contractId,
       operation: "yield_claim",
       params: { userAddress },
-      result: {
-        currentBalance: currentBalance.toString(),
-        totalSupply: totalSupply.toString(),
-        totalAssets: totalAssets.toString(),
-      },
+      result: operationResult,
       durationMs: Date.now() - startTime,
       fromCache: false,
     };
 
     await logSimulation(result);
-    res.json(result.result);
+    res.json(operationResult);
   } catch (err) {
     next(err);
   }
