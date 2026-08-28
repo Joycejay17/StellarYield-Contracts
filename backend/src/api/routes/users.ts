@@ -4,6 +4,7 @@ import {
   exportUserData,
   getKycBatch,
   getPortfoliosBatch,
+  getPositionsBatch,
   getUser,
   getUserIncomeForecast,
   getUserKyc,
@@ -15,6 +16,7 @@ import {
   getUserShareHistory,
   getUserYieldHistory,
   getUserYieldSummary,
+  getUserYieldBreakdown,
   searchUsers,
   streamUserPositions,
 } from "../controllers/users.js";
@@ -69,11 +71,23 @@ const shareHistoryQuerySchema = z.object({
   vaultId: z.string().length(56).regex(/^C[A-Z2-7]{55}$/).optional(),
 });
 
+const yieldBreakdownQuerySchema = z.object({
+  vaultId: z
+    .string()
+    .length(56)
+    .regex(/^C[A-Z2-7]{55}$/, "Invalid vault contract ID"),
+});
+
 usersRouter.get("/", validateQuery(searchQuerySchema), searchUsers);
 usersRouter.post(
   "/portfolios/batch",
   validateBody(batchPortfoliosBodySchema),
   getPortfoliosBatch,
+);
+usersRouter.post(
+  "/positions/batch",
+  validateBody(batchPortfoliosBodySchema),
+  getPositionsBatch,
 );
 usersRouter.post(
   "/kyc/batch",
@@ -102,6 +116,12 @@ usersRouter.get(
   "/:address/yield-summary",
   validateParams(addressParamSchema),
   getUserYieldSummary,
+);
+usersRouter.get(
+  "/:address/yield-breakdown",
+  validateParams(addressParamSchema),
+  validateQuery(yieldBreakdownQuerySchema),
+  getUserYieldBreakdown,
 );
 usersRouter.get(
   "/:address/kyc-history",
