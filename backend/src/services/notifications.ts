@@ -81,11 +81,10 @@ export class NotificationService {
     for (const webhook of webhooks) {
       if (webhook.channel === "email") {
         await this.sendEmailNotification(event, data, webhook.url);
-      } else if (webhook.channel === "slack") {
-        const payload = this.formatSlackPayload(event, data);
-        await jobQueue.send("webhook-deliver", { webhookId: webhook.id, payload });
       } else {
-        const payload = JSON.stringify({ event, data, timestamp: new Date().toISOString() });
+        const payload = webhook.channel === "slack"
+          ? this.formatSlackPayload(event, data)
+          : JSON.stringify({ event, data, timestamp: new Date().toISOString() });
         await jobQueue.send("webhook-deliver", { webhookId: webhook.id, payload });
       }
     }
