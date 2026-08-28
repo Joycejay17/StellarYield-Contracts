@@ -358,6 +358,27 @@ export async function getUserYieldSummary(
   }
 }
 
+export async function getUserYieldBreakdown(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const address = String(req.params["address"]);
+    const vaultId = String(req.query["vaultId"]);
+
+    const breakdown = await userService.getUserYieldBreakdown(address, vaultId);
+    if (!breakdown) {
+      res.status(404).json({ error: "NotFound", message: "User position not found for vault" });
+      return;
+    }
+
+    res.json(breakdown);
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getUserKycHistory(req: Request, res: Response, next: NextFunction) {
   try {
     const address = String(req.params["address"]);

@@ -761,4 +761,187 @@ export class YieldService {
 
     return { points, totalInRange };
   }
+
+  // ── APY vs target (#985) ─────────────────────────────────────────────────────
+  // Compares a vault's advertised APY (`expected_apy`, in basis points) against
+  // the APY actually delivered over the trailing 30-day window.
+  async getApyVsTarget(contractId: string): Promise<{
+    targetApy: number;
+    actualApy30d: number;
+    delta: number;
+    onTrack: boolean;
+  } | null> {
+    const vaultRows = await query<{ expected_apy: number | null; total_assets: string | null }>(
+      `SELECT expected_apy, total_assets
+       FROM vaults
+       WHERE contract_id = $1
+       LIMIT 1`,
+      [contractId],
+    );
+
+    if (vaultRows.length === 0) return null;
+
+    // `expected_apy` is stored in basis points; express as a decimal fraction.
+    const targetApy = (vaultRows[0].expected_apy ?? 0) / 10000;
+    const totalAssets = Number(vaultRows[0].total_assets ?? "0");
+
+    const windowStart = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const epochRows = await query<{ yield_amount: string; distributed_at: Date }>(
+      `SELECT e.yield_amount, e.distributed_at
+       FROM epochs e
+       JOIN vaults v ON e.vault_id = v.id
+       WHERE v.contract_id = $1 AND e.distributed_at >= $2
+       ORDER BY e.distributed_at ASC`,
+      [contractId, windowStart],
+    );
+
+    let actualApy30d = 0;
+    if (totalAssets > 0 && epochRows.length > 0) {
+      const totalYield = epochRows.reduce(
+        (sum, r) => sum + BigInt(r.yield_amount),
+        0n,
+      );
+      const firstAt = epochRows[0].distributed_at.getTime();
+      const lastAt = epochRows[epochRows.length - 1].distributed_at.getTime();
+      const elapsedDays = Math.min(
+        30,
+        Math.max(1, (lastAt - firstAt) / (24 * 60 * 60 * 1000)),
+      );
+      actualApy30d = (Number(totalYield) / totalAssets) * (365 / elapsedDays);
+    }
+
+    const delta = actualApy30d - targetApy;
+    // Within 1 percentage point (0.01) counts as on track.
+    const onTrack = delta >= -0.01;
+
+    return { targetApy, actualApy30d, delta, onTrack };
+  }
+
+  // ── APY trend indicator (#986) ───────────────────────────────────────────────
+  // Compares the average per-epoch yield_per_share of the most recent 3 epochs
+  // to the preceding 3 epochs.
+  async getApyTrend(contractId: string): Promise<{
+    trend: "improving" | "stable" | "declining" | null;
+    changePercent: number | null;
+    epochsAnalyzed: number;
+  } | null> {
+    const vaultRows = await query<{ id: number }>(
+      `SELECT id FROM vaults WHERE contract_id = $1 LIMIT 1`,
+      [contractId],
+    );
+    if (vaultRows.length === 0) return null;
+
+    const rows = await query<{ yps: string | null }>(
+      `SELECT (e.yield_amount::numeric / NULLIF(e.total_shares::numeric, 0))::text AS yps
+       FROM epochs e
+       JOIN vaults v ON e.vault_id = v.id
+       WHERE v.contract_id = $1 AND e.distributed_at IS NOT NULL
+       ORDER BY e.epoch DESC
+       LIMIT 6`,
+      [contractId],
+    );
+
+    const epochsAnalyzed = rows.length;
+    if (epochsAnalyzed < 6) {
+      return { trend: null, changePercent: null, epochsAnalyzed };
+    }
+
+    const toNum = (v: string | null) => (v == null ? 0 : Number(v));
+    const recent = rows.slice(0, 3).map((r) => toNum(r.yps));
+    const prior = rows.slice(3, 6).map((r) => toNum(r.yps));
+
+    const recentAvg = recent.reduce((a, b) => a + b, 0) / recent.length;
+    const priorAvg = prior.reduce((a, b) => a + b, 0) / prior.length;
+
+    if (priorAvg <= 0) {
+      const trend: "improving" | "stable" | "declining" =
+        recentAvg > 0 ? "improving" : "stable";
+      return {
+        trend,
+        changePercent: recentAvg > 0 ? 100 : 0,
+        epochsAnalyzed,
+      };
+    }
+
+    const changePercent = ((recentAvg - priorAvg) / priorAvg) * 100;
+    let trend: "improving" | "stable" | "declining";
+    if (changePercent > 5) trend = "improving";
+    else if (changePercent < -5) trend = "declining";
+    else trend = "stable";
+
+    return { trend, changePercent, epochsAnalyzed };
+  }
+
+  // ── Cross-vault yield correlation (#987) ────────────────────────────────────
+  // Pearson correlation of per-month average yield_per_share across the months
+  // both vaults have in common.
+  async getYieldCorrelation(
+    vaultAContractId: string,
+    vaultBContractId: string,
+  ): Promise<{
+    correlationCoefficient: number | null;
+    epochsOverlap: number;
+  } | null> {
+    const vaultRows = await query<{ id: number }>(
+      `SELECT id FROM vaults WHERE contract_id = $1 OR contract_id = $2 LIMIT 1`,
+      [vaultAContractId, vaultBContractId],
+    );
+    if (vaultRows.length === 0) return null;
+
+    const rows = await query<{ a_yps: string | null; b_yps: string | null }>(
+      `WITH a AS (
+         SELECT date_trunc('month', e.distributed_at) AS mon,
+                AVG(e.yield_amount::numeric / NULLIF(e.total_shares::numeric, 0)) AS yps
+         FROM epochs e
+         JOIN vaults v ON e.vault_id = v.id
+         WHERE v.contract_id = $1 AND e.distributed_at IS NOT NULL
+         GROUP BY 1
+       ),
+       b AS (
+         SELECT date_trunc('month', e.distributed_at) AS mon,
+                AVG(e.yield_amount::numeric / NULLIF(e.total_shares::numeric, 0)) AS yps
+         FROM epochs e
+         JOIN vaults v ON e.vault_id = v.id
+         WHERE v.contract_id = $2 AND e.distributed_at IS NOT NULL
+         GROUP BY 1
+       )
+       SELECT a.yps::text AS a_yps, b.yps::text AS b_yps
+       FROM a JOIN b ON a.mon = b.mon`,
+      [vaultAContractId, vaultBContractId],
+    );
+
+    const epochsOverlap = rows.length;
+    if (epochsOverlap < 3) {
+      return { correlationCoefficient: null, epochsOverlap };
+    }
+
+    const aVals = rows.map((r) => Number(r.a_yps ?? 0));
+    const bVals = rows.map((r) => Number(r.b_yps ?? 0));
+    const correlationCoefficient = this.pearson(aVals, bVals);
+
+    return { correlationCoefficient, epochsOverlap };
+  }
+
+  private pearson(xs: number[], ys: number[]): number | null {
+    const n = xs.length;
+    if (n === 0) return null;
+
+    const meanX = xs.reduce((a, b) => a + b, 0) / n;
+    const meanY = ys.reduce((a, b) => a + b, 0) / n;
+
+    let cov = 0;
+    let varX = 0;
+    let varY = 0;
+    for (let i = 0; i < n; i += 1) {
+      const dx = xs[i] - meanX;
+      const dy = ys[i] - meanY;
+      cov += dx * dy;
+      varX += dx * dx;
+      varY += dy * dy;
+    }
+
+    const denom = Math.sqrt(varX * varY);
+    if (denom === 0) return null;
+    return cov / denom;
+  }
 }

@@ -243,6 +243,48 @@ export async function getVault(req: Request, res: Response, next: NextFunction) 
   }
 }
 
+/**
+ * Bulk vault status query — closes #998.
+ *
+ * POST /api/v1/vaults/bulk/status  { contractIds: string[] }  (max 100)
+ * Returns `{ [contractId]: { state; paused; totalAssets; updatedAt } | null }`.
+ * Missing/unknown IDs resolve to `null` in their slot rather than failing the
+ * whole batch, so a dashboard rendering many vaults gets partial data instead
+ * of an all-or-nothing error.
+ */
+export async function getVaultsBulkStatus(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { contractIds } = req.body as { contractIds: string[] };
+
+    const entries = await Promise.all(
+      contractIds.map(async (contractId) => {
+        try {
+          const vault = await vaultService.getVault(contractId);
+          if (!vault) return [contractId, null] as const;
+
+          const paused = await readPaused(contractId).catch(() => false);
+
+          return [
+            contractId,
+            {
+              state: vault.state,
+              paused,
+              totalAssets: vault.totalAssets,
+              updatedAt: vault.updatedAt,
+            },
+          ] as const;
+        } catch {
+          return [contractId, null] as const;
+        }
+      }),
+    );
+
+    res.json(Object.fromEntries(entries));
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getVaultLiveState(req: Request, res: Response, next: NextFunction) {
   try {
     const contractId = String(req.params["contractId"]);

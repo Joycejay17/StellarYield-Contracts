@@ -1012,6 +1012,8 @@ export class VaultService {
     logger.info({ contractId }, "Vault upserted successfully");
     await cacheDel(`vault:${contractId}`);
     await cacheDel("vaults:list:*");
+    // Issue #1014: Invalidate simulation cache when vault state changes
+    await cacheDel(`sim:${contractId}:*`);
   }
 
   async listVaultOperators(contractId: string): Promise<{

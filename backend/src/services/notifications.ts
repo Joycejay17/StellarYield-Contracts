@@ -58,7 +58,12 @@ interface WebhookRow {
   events: string[];
   secret: string | null;
   consecutive_failures: number;
+  priority: number;
+  fallback_channel: number | null;
 }
+
+/** Max delivery attempts before a webhook_deliveries row is considered exhausted. */
+const MAX_DELIVERY_ATTEMPTS = 6;
 
 export class NotificationService {
   /**
@@ -70,7 +75,10 @@ export class NotificationService {
    */
   async notify(event: string, data: Record<string, unknown>): Promise<void> {
     const webhooks = await query<WebhookRow>(
-      "SELECT id, url, events, secret, consecutive_failures FROM webhooks WHERE active = TRUE AND $1 = ANY(events)",
+      `SELECT id, url, events, secret, consecutive_failures, priority, fallback_channel
+       FROM webhooks
+       WHERE active = TRUE AND $1 = ANY(events)
+       ORDER BY priority ASC, created_at DESC`,
       [event],
     );
 
@@ -78,11 +86,23 @@ export class NotificationService {
 
     const payload = JSON.stringify({ event, data, timestamp: new Date().toISOString() });
 
-    await Promise.allSettled(
-      webhooks.map((webhook) =>
-        jobQueue.send("webhook-deliver", { webhookId: webhook.id, payload }),
-      ),
-    );
+    // Attempt channels in ascending priority order (lower value = higher
+    // priority). Channels that share a priority are dispatched concurrently;
+    // each priority tier is enqueued before the next one starts (#1025).
+    const tiers = new Map<number, WebhookRow[]>();
+    for (const webhook of webhooks) {
+      const tier = tiers.get(webhook.priority) ?? [];
+      tier.push(webhook);
+      tiers.set(webhook.priority, tier);
+    }
+
+    for (const priority of [...tiers.keys()].sort((a, b) => a - b)) {
+      await Promise.allSettled(
+        tiers.get(priority)!.map((webhook) =>
+          jobQueue.send("webhook-deliver", { webhookId: webhook.id, payload }),
+        ),
+      );
+    }
   }
 
   /**
@@ -90,19 +110,27 @@ export class NotificationService {
    */
   async getWebhooks(): Promise<WebhookRow[]> {
     return query<WebhookRow>(
-      "SELECT id, url, events, secret, consecutive_failures FROM webhooks WHERE active = TRUE ORDER BY created_at DESC",
+      `SELECT id, url, events, secret, consecutive_failures, priority, fallback_channel
+       FROM webhooks
+       WHERE active = TRUE
+       ORDER BY priority ASC, created_at DESC`,
     );
   }
 
   /**
    * Register a new webhook. Returns the created webhook row.
    */
-  async createWebhook(url: string, events: string[], secret?: string): Promise<WebhookRow> {
+  async createWebhook(
+    url: string,
+    events: string[],
+    secret?: string,
+    priority = 0,
+  ): Promise<WebhookRow> {
     const rows = await query<WebhookRow>(
-      `INSERT INTO webhooks (url, events, secret)
-       VALUES ($1, $2, $3)
-       RETURNING id, url, events, secret, consecutive_failures`,
-      [url, events, secret ?? null],
+      `INSERT INTO webhooks (url, events, secret, priority)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, url, events, secret, consecutive_failures, priority, fallback_channel`,
+      [url, events, secret ?? null, priority],
     );
     return rows[0];
   }
@@ -129,8 +157,9 @@ export class NotificationService {
       webhook_id: number;
       payload: string;
       attempt: number;
+      fallback_channel: number | null;
     }>(
-      `SELECT wd.id, wd.webhook_id, wd.payload, wd.attempt
+      `SELECT wd.id, wd.webhook_id, wd.payload, wd.attempt, w.fallback_channel
        FROM webhook_deliveries wd
        JOIN webhooks w ON w.id = wd.webhook_id AND w.active = TRUE
        WHERE wd.next_retry_at <= NOW()
@@ -143,7 +172,8 @@ export class NotificationService {
     for (const row of dueRows) {
       try {
         const webhookRows = await query<WebhookRow>(
-          "SELECT id, url, events, secret, consecutive_failures FROM webhooks WHERE id = $1",
+          `SELECT id, url, events, secret, consecutive_failures, priority, fallback_channel
+           FROM webhooks WHERE id = $1`,
           [row.webhook_id],
         );
         if (webhookRows.length === 0) continue;
@@ -176,6 +206,7 @@ export class NotificationService {
              WHERE id = $4`,
             [nextAttempt, delaySeconds, "non-2xx response", row.id],
           );
+          await this.maybeEscalateToFallback(row, nextAttempt);
         }
       } catch (err) {
         const nextAttempt = row.attempt + 1;
@@ -186,8 +217,32 @@ export class NotificationService {
            WHERE id = $4`,
           [nextAttempt, delaySeconds, String(err), row.id],
         );
+        await this.maybeEscalateToFallback(row, nextAttempt);
       }
     }
+  }
+
+  /**
+   * When a primary webhook has exhausted its retry budget (#219) and defines a
+   * fallback channel, enqueue a single delivery attempt to that fallback
+   * webhook with the original payload (#1024). No-op while retries remain or
+   * when no fallback is configured.
+   */
+  private async maybeEscalateToFallback(
+    row: { id: number; webhook_id: number; payload: string; fallback_channel: number | null },
+    nextAttempt: number,
+  ): Promise<void> {
+    if (nextAttempt < MAX_DELIVERY_ATTEMPTS || row.fallback_channel == null) return;
+
+    logger.warn(
+      { webhookId: row.webhook_id, fallbackChannel: row.fallback_channel, deliveryId: row.id },
+      "Primary webhook exhausted retries; escalating delivery to fallback channel",
+    );
+
+    await jobQueue.send("webhook-deliver", {
+      webhookId: row.fallback_channel,
+      payload: row.payload,
+    });
   }
 
   /**
