@@ -34,6 +34,7 @@ import {
   getVaultFees,
   getCooperatorFees,
   streamVaultEvents,
+  getVaultsBulkStatus,
 } from "../controllers/vaults.js";
 import {
   translateSimulationError,
@@ -191,6 +192,11 @@ vaultsRouter.get("/new", validateQuery(newVaultsQuerySchema), getNewVaults);
 vaultsRouter.get("/maturing-soon", validateQuery(maturingSoonQuerySchema), getMaturingSoonVaults);
 vaultsRouter.get("/fully-funded", getFullyFundedVaults);
 vaultsRouter.get("/stream", streamVaultEvents);
+// Issue #998: Bulk vault status query (placed before /:contractId routes)
+const bulkStatusBodySchema = z.object({
+  contractIds: z.array(contractAddressSchema).min(1).max(100),
+});
+vaultsRouter.post("/bulk/status", validateBody(bulkStatusBodySchema), getVaultsBulkStatus);
 // Issue #1015: Simulation error translation (placed before /:contractId routes)
 vaultsRouter.post(
   "/simulate/translate-error",
