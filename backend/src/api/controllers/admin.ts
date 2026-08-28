@@ -220,6 +220,42 @@ export async function getWebhookDeliveries(req: Request, res: Response, next: Ne
   }
 }
 
+const bulkToggleWebhooksSchema = z.object({
+  ids: z.array(z.string().regex(/^\d+$/, "Each id must be a positive integer")).min(1).max(50),
+  active: z.boolean(),
+}).strict();
+
+/** POST /admin/webhooks/bulk/toggle — enable/disable up to 50 webhooks in one query (#1006) */
+export async function bulkToggleWebhooks(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = bulkToggleWebhooksSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        error: "BadRequest",
+        message: "ids must be a non-empty array of at most 50 numeric-string webhook IDs, and active must be a boolean",
+        details: parsed.error.issues,
+      });
+      return;
+    }
+
+    const { ids, active } = parsed.data;
+    // De-duplicate so the same ID repeated in the request body doesn't
+    // inflate the affected-row count reported back to the caller.
+    const idNums = [...new Set(ids.map((id) => parseInt(id, 10)))];
+
+    const rows = await query<{ id: number }>(
+      "UPDATE webhooks SET active = $1 WHERE id = ANY($2) RETURNING id",
+      [active, idNums],
+    );
+
+    await logAdminAudit(req, "bulk_toggle_webhooks", "/api/v1/admin/webhooks/bulk/toggle");
+
+    res.json({ updated: rows.length, ids: rows.map((r) => r.id), active });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getAdminEvents(req: Request, res: Response, next: NextFunction) {
   try {
     const { contractId, eventType } = req.query as Record<string, string | undefined>;

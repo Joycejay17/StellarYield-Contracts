@@ -36,6 +36,12 @@ async function getTestContext() {
   return { query: query as ReturnType<typeof vi.fn>, getAdminStats };
 }
 
+async function getBulkToggleContext() {
+  const { query } = await import("../../db/index.js");
+  const { bulkToggleWebhooks } = await import("./admin.js");
+  return { query: query as ReturnType<typeof vi.fn>, bulkToggleWebhooks };
+}
+
 async function getApp() {
   const { createApp } = await import("../../app.js");
   return createApp();
@@ -238,6 +244,84 @@ describe("Admin Controller", () => {
 
       expect(res.status).toHaveBeenCalledWith(400);
       expect(jobQueue.send).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("bulkToggleWebhooks (#1006)", () => {
+    it("updates all listed webhook ids in one query and returns the affected count/ids", async () => {
+      const { query, bulkToggleWebhooks } = await getBulkToggleContext();
+      query.mockImplementation((sql: string) => {
+        if (sql.includes("UPDATE webhooks")) {
+          return Promise.resolve([{ id: 1 }, { id: 2 }, { id: 3 }]);
+        }
+        return Promise.resolve([]);
+      });
+
+      const req = { body: { ids: ["1", "2", "3"], active: false }, headers: {}, apiKey: undefined } as any;
+      const res = { status: vi.fn().mockReturnThis(), json: vi.fn() } as any;
+      const next = vi.fn();
+
+      await bulkToggleWebhooks(req, res, next);
+
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining("UPDATE webhooks SET active = $1 WHERE id = ANY($2)"),
+        [false, [1, 2, 3]],
+      );
+      expect(res.json).toHaveBeenCalledWith({ updated: 3, ids: [1, 2, 3], active: false });
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    it("de-duplicates repeated ids before querying", async () => {
+      const { query, bulkToggleWebhooks } = await getBulkToggleContext();
+      query.mockResolvedValue([{ id: 5 }]);
+
+      const req = { body: { ids: ["5", "5"], active: true }, headers: {}, apiKey: undefined } as any;
+      const res = { status: vi.fn().mockReturnThis(), json: vi.fn() } as any;
+      const next = vi.fn();
+
+      await bulkToggleWebhooks(req, res, next);
+
+      expect(query).toHaveBeenCalledWith(expect.any(String), [true, [5]]);
+    });
+
+    it("returns 400 without querying when ids is empty", async () => {
+      const { query, bulkToggleWebhooks } = await getBulkToggleContext();
+
+      const req = { body: { ids: [], active: true }, headers: {}, apiKey: undefined } as any;
+      const res = { status: vi.fn().mockReturnThis(), json: vi.fn() } as any;
+      const next = vi.fn();
+
+      await bulkToggleWebhooks(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(query).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 without querying when more than 50 ids are given", async () => {
+      const { query, bulkToggleWebhooks } = await getBulkToggleContext();
+
+      const ids = Array.from({ length: 51 }, (_, i) => String(i + 1));
+      const req = { body: { ids, active: true }, headers: {}, apiKey: undefined } as any;
+      const res = { status: vi.fn().mockReturnThis(), json: vi.fn() } as any;
+      const next = vi.fn();
+
+      await bulkToggleWebhooks(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(query).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 without querying when active is not a boolean", async () => {
+      const { query, bulkToggleWebhooks } = await getBulkToggleContext();
+
+      const req = { body: { ids: ["1"], active: "yes" }, headers: {}, apiKey: undefined } as any;
+      const res = { status: vi.fn().mockReturnThis(), json: vi.fn() } as any;
+      const next = vi.fn();
+
+      await bulkToggleWebhooks(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(query).not.toHaveBeenCalled();
     });
   });
 
